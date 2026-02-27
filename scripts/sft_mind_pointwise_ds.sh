@@ -107,9 +107,13 @@ LEARNING_RATE=${LEARNING_RATE:-2e-5}     # 2e-5 for 8B model
 CUTOFF_LEN=${CUTOFF_LEN:-2048}
 NUM_EPOCHS=${NUM_EPOCHS:-5}
 MAX_HISTORY=${MAX_HISTORY:-30}
-NEG_RATIO=${NEG_RATIO:-2.0}
+NEG_RATIO=${NEG_RATIO:-1.0}
 USE_ABSTRACT=${USE_ABSTRACT:-False}
 USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-0}"  # Set to 1 for instruct models (e.g., Qwen3-1.7B, Qwen3-4B-Instruct)
+LOSS_TYPE=${LOSS_TYPE:-ce}  # ce, weighted_ce, pairwise
+LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
+MARGIN=${MARGIN:-1.0}  # Margin for pairwise loss
+POS_WEIGHT=${POS_WEIGHT:-2.0}  # Weight for positive samples in weighted_ce
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}  # Will be set after OUTPUT_NAME is constructed
 DS_CONFIG=${DS_CONFIG:-ds_configs/ds_config_zero2.json}
 # Convert to absolute path for multi-node compatibility
@@ -135,7 +139,17 @@ EVAL_NEWS=${DATA_ROOT}/dev/news.tsv
 
 # Output directory (configurable)
 MODEL_BASENAME=$(basename ${MODEL_PATH})
-OUTPUT_NAME="sft_mind_pointwise_${MIND_SIZE}_${MODEL_BASENAME}_bs${BATCH_SIZE}_ep${NUM_EPOCHS}_neg${NEG_RATIO}_hist${MAX_HISTORY}"
+OUTPUT_NAME="sft_mind_pointwise_${MIND_SIZE}_${MODEL_BASENAME}_bs${BATCH_SIZE}_ep${NUM_EPOCHS}_lr${LEARNING_RATE}_neg${NEG_RATIO}_hist${MAX_HISTORY}"
+# Append loss type and its specific hyperparams
+if [[ "${LOSS_TYPE}" == "weighted_ce" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_weightedce_pw${POS_WEIGHT}"
+elif [[ "${LOSS_TYPE}" == "pairwise" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_pairwise_m${MARGIN}"
+fi
+# Append label smoothing if nonzero
+if [[ "${LABEL_SMOOTHING}" != "0.0" ]] && [[ "${LABEL_SMOOTHING}" != "0" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_ls${LABEL_SMOOTHING}"
+fi
 if [[ "${USE_CHAT_TEMPLATE}" -eq 1 ]]; then
     OUTPUT_NAME="${OUTPUT_NAME}_chat"
 fi
@@ -149,6 +163,10 @@ echo "Train news: ${TRAIN_NEWS}"
 echo "Eval behaviors: ${EVAL_BEHAVIORS}"
 echo "Eval news: ${EVAL_NEWS}"
 echo "Chat template: $(if [[ "${USE_CHAT_TEMPLATE}" -eq 1 ]]; then echo "enabled"; else echo "disabled"; fi)"
+echo "Loss type: ${LOSS_TYPE}"
+if [[ "${LOSS_TYPE}" == "weighted_ce" ]]; then echo "Pos weight: ${POS_WEIGHT}"; fi
+if [[ "${LOSS_TYPE}" == "pairwise" ]]; then echo "Margin: ${MARGIN}"; fi
+if [[ "${LABEL_SMOOTHING}" != "0.0" ]]; then echo "Label smoothing: ${LABEL_SMOOTHING}"; fi
 
 export PDSH_RCMD_TYPE=ssh
 
@@ -176,6 +194,10 @@ deepspeed --hostfile=$HOSTFILE \
         --neg_ratio ${NEG_RATIO} \
         --use_abstract ${USE_ABSTRACT} \
         $(if [[ "${USE_CHAT_TEMPLATE}" -eq 1 ]]; then echo "--use_chat_template True"; fi) \
+        --loss_type ${LOSS_TYPE} \
+        --label_smoothing ${LABEL_SMOOTHING} \
+        --margin ${MARGIN} \
+        --pos_weight ${POS_WEIGHT} \
         --wandb_project MiniOneRec_MIND \
         --wandb_run_name ${WANDB_RUN_NAME} \
         --train_from_scratch False \

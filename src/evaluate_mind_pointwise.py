@@ -138,11 +138,11 @@ def main():
 
     set_seed(args.seed)
 
-    print(f"Loading news from: {args.news_path}")
+    print(f"[1/3] Loading news from: {args.news_path}", flush=True)
     news = load_news(args.news_path, args.use_abstract)
-    print(f"Loaded {len(news)} news articles")
+    print(f"  ✓ Loaded {len(news)} news articles", flush=True)
 
-    print(f"Loading model from: {args.model_path}")
+    print(f"[2/3] Loading model from: {args.model_path}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -162,7 +162,7 @@ def main():
     )
     model.eval()
     device = next(model.parameters()).device
-    print(f"Model loaded on device: {device}")
+    print(f"  ✓ Model loaded on device: {device}", flush=True)
 
     # Get Yes/No token IDs
     yes_tokens = tokenizer.encode(" Yes", add_special_tokens=False)
@@ -172,8 +172,8 @@ def main():
     yes_token_id = yes_tokens[0] if len(yes_tokens) == 1 else yes_tokens[-1]
     no_token_id = no_tokens[0] if len(no_tokens) == 1 else no_tokens[-1]
 
-    print(f"Yes token ID: {yes_token_id} ('{tokenizer.decode([yes_token_id])}')")
-    print(f"No token ID: {no_token_id} ('{tokenizer.decode([no_token_id])}')")
+    print(f"  Yes token ID: {yes_token_id} ('{tokenizer.decode([yes_token_id])}')", flush=True)
+    print(f"  No token ID: {no_token_id} ('{tokenizer.decode([no_token_id])}')", flush=True)
 
     def _avg(xs):
         return float(np.mean(xs)) if xs else 0.0
@@ -195,13 +195,15 @@ def main():
     count = 0
     skipped_malformed = 0
 
-    print(f"\nEvaluating with point-wise format (Yes/No)...")
-    print(f"Use abstract: {args.use_abstract}")
-    print(f"Max history: {'unlimited' if args.max_history == 0 else args.max_history}")
-    print(f"Batch size: {args.batch_size}")
+    print(f"\n[3/3] Evaluating with point-wise format (Yes/No)...", flush=True)
+    print(f"  Use abstract: {args.use_abstract}", flush=True)
+    print(f"  Max history: {'unlimited' if args.max_history == 0 else args.max_history}", flush=True)
+    print(f"  Batch size: {args.batch_size}", flush=True)
     if args.quick:
-        print(f"Quick mode: {args.max_impressions} impressions")
-    print()
+        print(f"  Quick mode: {args.max_impressions} impressions", flush=True)
+    if total_to_process:
+        print(f"  Total impressions: {total_to_process}", flush=True)
+    print(flush=True)
 
     with open(args.behaviors_path, "r", encoding="utf-8") as f:
         pbar = tqdm(total=total_to_process, desc="Evaluating impressions", unit="impression")
@@ -259,12 +261,18 @@ def main():
 
             # Update progress bar
             pbar.update(1)
-            pbar.set_postfix({
-                'AUC': f'{_avg(aucs):.4f}',
-                'MRR': f'{_avg(mrrs):.4f}',
-                'nDCG@5': f'{_avg(ndcg5):.4f}',
-                'nDCG@10': f'{_avg(ndcg10):.4f}'
-            })
+            if count % 10 == 0 or count <= 5:
+                pbar.set_postfix({
+                    'AUC': f'{_avg(aucs):.4f}',
+                    'MRR': f'{_avg(mrrs):.4f}',
+                    'nDCG@5': f'{_avg(ndcg5):.4f}',
+                    'nDCG@10': f'{_avg(ndcg10):.4f}'
+                })
+            # Print periodic progress (useful when tqdm refresh is suppressed by piping)
+            if count % 200 == 0:
+                print(f"  Progress: {count}/{total_to_process or '?'} impressions | "
+                      f"AUC={_avg(aucs):.4f} MRR={_avg(mrrs):.4f} "
+                      f"nDCG@5={_avg(ndcg5):.4f} nDCG@10={_avg(ndcg10):.4f}", flush=True)
 
             if args.max_impressions and count >= args.max_impressions:
                 break
