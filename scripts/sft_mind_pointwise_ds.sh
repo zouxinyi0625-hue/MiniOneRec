@@ -110,10 +110,13 @@ MAX_HISTORY=${MAX_HISTORY:-30}
 NEG_RATIO=${NEG_RATIO:-1.0}
 USE_ABSTRACT=${USE_ABSTRACT:-False}
 USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-0}"  # Set to 1 for instruct models (e.g., Qwen3-1.7B, Qwen3-4B-Instruct)
-LOSS_TYPE=${LOSS_TYPE:-ce}  # ce, weighted_ce, pairwise
+LOSS_TYPE=${LOSS_TYPE:-ce}  # ce, weighted_ce, pairwise, infonce, lambdarank, softmax_ce
 LABEL_SMOOTHING=${LABEL_SMOOTHING:-0.0}
 MARGIN=${MARGIN:-1.0}  # Margin for pairwise loss
 POS_WEIGHT=${POS_WEIGHT:-2.0}  # Weight for positive samples in weighted_ce
+TEMPERATURE=${TEMPERATURE:-0.1}  # Temperature for infonce / softmax_ce
+RANKING_WEIGHT=${RANKING_WEIGHT:-1.0}  # Weight of ranking loss vs CE (α)
+MAX_CANDIDATES=${MAX_CANDIDATES:-20}  # Max candidates per impression (lambdarank/softmax_ce)
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}  # Will be set after OUTPUT_NAME is constructed
 DS_CONFIG=${DS_CONFIG:-ds_configs/ds_config_zero2.json}
 # Convert to absolute path for multi-node compatibility
@@ -145,6 +148,12 @@ if [[ "${LOSS_TYPE}" == "weighted_ce" ]]; then
     OUTPUT_NAME="${OUTPUT_NAME}_weightedce_pw${POS_WEIGHT}"
 elif [[ "${LOSS_TYPE}" == "pairwise" ]]; then
     OUTPUT_NAME="${OUTPUT_NAME}_pairwise_m${MARGIN}"
+elif [[ "${LOSS_TYPE}" == "infonce" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_infonce_t${TEMPERATURE}_a${RANKING_WEIGHT}"
+elif [[ "${LOSS_TYPE}" == "lambdarank" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_lambdarank_a${RANKING_WEIGHT}_c${MAX_CANDIDATES}"
+elif [[ "${LOSS_TYPE}" == "softmax_ce" ]]; then
+    OUTPUT_NAME="${OUTPUT_NAME}_softmaxce_t${TEMPERATURE}_a${RANKING_WEIGHT}_c${MAX_CANDIDATES}"
 fi
 # Append label smoothing if nonzero
 if [[ "${LABEL_SMOOTHING}" != "0.0" ]] && [[ "${LABEL_SMOOTHING}" != "0" ]]; then
@@ -166,6 +175,9 @@ echo "Chat template: $(if [[ "${USE_CHAT_TEMPLATE}" -eq 1 ]]; then echo "enabled
 echo "Loss type: ${LOSS_TYPE}"
 if [[ "${LOSS_TYPE}" == "weighted_ce" ]]; then echo "Pos weight: ${POS_WEIGHT}"; fi
 if [[ "${LOSS_TYPE}" == "pairwise" ]]; then echo "Margin: ${MARGIN}"; fi
+if [[ "${LOSS_TYPE}" == "infonce" ]]; then echo "Temperature: ${TEMPERATURE}, Ranking weight: ${RANKING_WEIGHT}"; fi
+if [[ "${LOSS_TYPE}" == "lambdarank" ]]; then echo "Ranking weight: ${RANKING_WEIGHT}, Max candidates: ${MAX_CANDIDATES}"; fi
+if [[ "${LOSS_TYPE}" == "softmax_ce" ]]; then echo "Temperature: ${TEMPERATURE}, Ranking weight: ${RANKING_WEIGHT}, Max candidates: ${MAX_CANDIDATES}"; fi
 if [[ "${LABEL_SMOOTHING}" != "0.0" ]]; then echo "Label smoothing: ${LABEL_SMOOTHING}"; fi
 
 export PDSH_RCMD_TYPE=ssh
@@ -198,6 +210,9 @@ deepspeed --hostfile=$HOSTFILE \
         --label_smoothing ${LABEL_SMOOTHING} \
         --margin ${MARGIN} \
         --pos_weight ${POS_WEIGHT} \
+        --temperature ${TEMPERATURE} \
+        --ranking_weight ${RANKING_WEIGHT} \
+        --max_candidates ${MAX_CANDIDATES} \
         --wandb_project MiniOneRec_MIND \
         --wandb_run_name ${WANDB_RUN_NAME} \
         --train_from_scratch False \

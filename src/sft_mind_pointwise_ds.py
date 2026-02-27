@@ -63,6 +63,29 @@ def set_seed(seed):
 # ==================== Custom Trainers ====================
 
 
+def _extract_scores(logits, labels, yes_token_id, no_token_id):
+    """
+    Extract relevance scores (log P(Yes) - log P(No)) at the answer prediction position.
+
+    For each sample in the batch, finds where labels != -100 (the first answer token),
+    and reads the logit from position (answer_pos - 1) which predicts that token.
+
+    Returns:
+        scores: (B,) tensor of relevance scores
+    """
+    answer_mask = (labels != -100)  # (B, L)
+    # First non-masked position = the answer token position
+    first_answer_pos = answer_mask.long().argmax(dim=1).clamp(min=1)  # (B,)
+    pred_pos = first_answer_pos - 1  # logit[i] predicts token[i+1]
+
+    batch_indices = torch.arange(logits.size(0), device=logits.device)
+    answer_logits = logits[batch_indices, pred_pos, :]  # (B, V)
+
+    log_probs = F.log_softmax(answer_logits, dim=-1)
+    scores = log_probs[:, yes_token_id] - log_probs[:, no_token_id]  # (B,)
+    return scores
+
+
 class WeightedCETrainer(transformers.Trainer):
     """Trainer with class-weighted CE loss (higher weight on positive 'Yes' samples)."""
 
@@ -165,6 +188,298 @@ class PairwiseTrainer(transformers.Trainer):
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         """Override to handle pairwise inputs during evaluation."""
+        model.eval()
+        with torch.no_grad():
+            inputs = self._prepare_inputs(inputs)
+            loss = self.compute_loss(model, inputs)
+        return (loss, None, None)
+
+
+class InfoNCETrainer(transformers.Trainer):
+    """
+    In-batch contrastive learning trainer for recommendations.
+
+    Uses the standard MINDPointwiseSFTDataset. Within each micro-batch, treats
+    positive samples' Yes-logit as anchors and computes InfoNCE loss against
+    all other samples in the batch.
+
+    Loss = CE_token + α * InfoNCE_ranking
+
+    Key insight: Instead of each sample learning independently, every positive
+    sample uses ALL negatives in the batch, giving O(B) gradient signal per sample.
+    """
+
+    def __init__(self, temperature=0.1, ranking_weight=1.0,
+                 yes_token_id=None, no_token_id=None, **kwargs):
+        super().__init__(**kwargs)
+        self.temperature = temperature
+        self.ranking_weight = ranking_weight
+        self.yes_token_id = yes_token_id
+        self.no_token_id = no_token_id
+        print(f"  InfoNCE: τ={temperature}, α={ranking_weight}, "
+              f"yes_id={yes_token_id}, no_id={no_token_id}")
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        labels = inputs.get("labels")
+        outputs = model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+        )
+        logits = outputs.logits
+
+        # 1. Standard CE loss (teaches model to say Yes/No)
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+        # 2. InfoNCE on relevance scores
+        scores = _extract_scores(logits, labels, self.yes_token_id, self.no_token_id)  # (B,)
+
+        # Determine which samples are positive (label=Yes) vs negative (label=No)
+        # Check if the first non-masked label token is yes_token_id
+        answer_mask = (labels != -100)
+        first_answer_pos = answer_mask.long().argmax(dim=1)
+        batch_indices = torch.arange(labels.size(0), device=labels.device)
+        first_answer_token = labels[batch_indices, first_answer_pos]
+        is_positive = (first_answer_token == self.yes_token_id).float()  # (B,)
+
+        num_pos = is_positive.sum()
+        if num_pos > 0 and num_pos < len(is_positive):
+            # InfoNCE: for each positive, compute softmax over (itself, all negatives)
+            # score_matrix[i] = scores / τ for sample i
+            scaled_scores = scores / self.temperature  # (B,)
+
+            # Mask: for each positive i, we want to compute
+            # -log( exp(s_i) / (exp(s_i) + sum_j_neg exp(s_j)) )
+            neg_mask = (1.0 - is_positive).bool()  # True for negatives
+            neg_scores = scaled_scores[neg_mask]  # (N_neg,)
+
+            pos_mask = is_positive.bool()
+            pos_scores = scaled_scores[pos_mask]  # (N_pos,)
+
+            # For each positive: log_sum_exp over [pos_score_i, all neg_scores]
+            # Shape: (N_pos, 1 + N_neg)
+            all_for_softmax = torch.cat([
+                pos_scores.unsqueeze(1),  # (N_pos, 1)
+                neg_scores.unsqueeze(0).expand(int(num_pos.item()), -1),  # (N_pos, N_neg)
+            ], dim=1)
+
+            # Target: index 0 (the positive) for each row
+            infonce_targets = torch.zeros(int(num_pos.item()), dtype=torch.long,
+                                         device=logits.device)
+            infonce_loss = F.cross_entropy(all_for_softmax, infonce_targets)
+        else:
+            infonce_loss = torch.tensor(0.0, device=logits.device)
+
+        loss = ce_loss + self.ranking_weight * infonce_loss
+        return (loss, outputs) if return_outputs else loss
+
+
+class LambdaRankTrainer(transformers.Trainer):
+    """
+    LambdaRank-style trainer: pairwise loss weighted by ΔnDCG.
+
+    Uses MINDImpressionDataset (grouped by impression). For each impression,
+    enumerates all (pos, neg) pairs and weights each pair's gradient by the
+    change in nDCG if they were swapped.
+
+    Loss = CE_token + α * Σ |ΔnDCG_{ij}| * log(1 + exp(s_neg - s_pos))
+
+    This directly optimizes nDCG, focusing on pairs where a swap matters most.
+    """
+
+    def __init__(self, ranking_weight=1.0, yes_token_id=None, no_token_id=None, **kwargs):
+        super().__init__(**kwargs)
+        self.ranking_weight = ranking_weight
+        self.yes_token_id = yes_token_id
+        self.no_token_id = no_token_id
+        print(f"  LambdaRank: α={ranking_weight}, yes_id={yes_token_id}, no_id={no_token_id}")
+
+    @staticmethod
+    def _compute_delta_ndcg(scores, labels):
+        """
+        Compute |ΔnDCG| for all (pos, neg) pairs given scores and binary labels.
+
+        Returns:
+            pos_indices: (P,) indices of positive items
+            neg_indices: (N,) indices of negative items
+            delta_ndcg: (P, N) matrix of |ΔnDCG| values
+        """
+        n = len(scores)
+        sorted_indices = torch.argsort(scores, descending=True)
+        ranks = torch.zeros(n, device=scores.device)
+        ranks[sorted_indices] = torch.arange(1, n + 1, dtype=torch.float, device=scores.device)
+
+        # DCG discount at each position
+        discounts = 1.0 / torch.log2(ranks + 1)  # (n,)
+
+        # Ideal DCG (best possible)
+        ideal_dcg = (labels.float().sort(descending=True).values[:min(n, 10)] /
+                     torch.log2(torch.arange(2, min(n, 10) + 2, dtype=torch.float,
+                                            device=scores.device))).sum()
+        ideal_dcg = ideal_dcg.clamp(min=1e-8)
+
+        pos_idx = torch.where(labels == 1)[0]
+        neg_idx = torch.where(labels == 0)[0]
+
+        if len(pos_idx) == 0 or len(neg_idx) == 0:
+            return pos_idx, neg_idx, torch.zeros(0, device=scores.device)
+
+        # |ΔnDCG_ij| = |discount(rank_i) - discount(rank_j)| * |gain_i - gain_j| / ideal_dcg
+        # For binary labels: gain_i - gain_j = 1 for (pos, neg) pairs
+        pos_discounts = discounts[pos_idx]  # (P,)
+        neg_discounts = discounts[neg_idx]  # (N,)
+
+        delta_ndcg = torch.abs(pos_discounts.unsqueeze(1) - neg_discounts.unsqueeze(0)) / ideal_dcg
+
+        return pos_idx, neg_idx, delta_ndcg
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        all_input_ids = inputs["input_ids"]       # (total_candidates, L)
+        all_labels = inputs["labels"]             # (total_candidates, L)
+        all_attention_mask = inputs["attention_mask"]
+        binary_labels = inputs["binary_labels"]   # (total_candidates,) - 0/1 click labels
+        group_sizes = inputs["group_sizes"]       # (B,) - number of candidates per impression
+
+        outputs = model(input_ids=all_input_ids, attention_mask=all_attention_mask)
+        logits = outputs.logits
+
+        # 1. CE loss on all samples
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = all_labels[..., 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+        # 2. LambdaRank loss per impression group
+        scores = _extract_scores(logits, all_labels, self.yes_token_id, self.no_token_id)
+
+        lambda_loss = torch.tensor(0.0, device=logits.device)
+        offset = 0
+        num_groups = 0
+        for gs in group_sizes:
+            gs = int(gs.item())
+            if gs < 2:
+                offset += gs
+                continue
+
+            group_scores = scores[offset:offset + gs]
+            group_labels = binary_labels[offset:offset + gs]
+
+            pos_idx, neg_idx, delta_ndcg = self._compute_delta_ndcg(
+                group_scores.detach(), group_labels
+            )
+
+            if len(pos_idx) > 0 and len(neg_idx) > 0 and delta_ndcg.numel() > 0:
+                pos_s = group_scores[pos_idx]  # (P,)
+                neg_s = group_scores[neg_idx]  # (N,)
+
+                # λ loss = |ΔnDCG| * log(1 + exp(s_neg - s_pos))
+                diff = neg_s.unsqueeze(0) - pos_s.unsqueeze(1)  # (P, N)
+                pair_loss = delta_ndcg * F.softplus(diff)
+                lambda_loss = lambda_loss + pair_loss.mean()
+                num_groups += 1
+
+            offset += gs
+
+        if num_groups > 0:
+            lambda_loss = lambda_loss / num_groups
+
+        loss = ce_loss + self.ranking_weight * lambda_loss
+        return (loss, outputs) if return_outputs else loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        model.eval()
+        with torch.no_grad():
+            inputs = self._prepare_inputs(inputs)
+            loss = self.compute_loss(model, inputs)
+        return (loss, None, None)
+
+
+class SoftmaxCETrainer(transformers.Trainer):
+    """
+    Impression-level softmax cross-entropy trainer.
+
+    For each impression, computes softmax over all candidate scores and applies
+    cross-entropy with the clicked items as targets.
+
+    Loss = CE_token + α * (-log Σ_clicked exp(s_i) / Σ_all exp(s_j))
+
+    This is the most natural loss for recommendation: learn to assign highest
+    probability to clicked items among all candidates in the impression.
+    """
+
+    def __init__(self, ranking_weight=1.0, temperature=1.0,
+                 yes_token_id=None, no_token_id=None, **kwargs):
+        super().__init__(**kwargs)
+        self.ranking_weight = ranking_weight
+        self.temperature = temperature
+        self.yes_token_id = yes_token_id
+        self.no_token_id = no_token_id
+        print(f"  SoftmaxCE: α={ranking_weight}, τ={temperature}, "
+              f"yes_id={yes_token_id}, no_id={no_token_id}")
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        all_input_ids = inputs["input_ids"]
+        all_labels = inputs["labels"]
+        all_attention_mask = inputs["attention_mask"]
+        binary_labels = inputs["binary_labels"]   # (total_candidates,)
+        group_sizes = inputs["group_sizes"]       # (B,)
+
+        outputs = model(input_ids=all_input_ids, attention_mask=all_attention_mask)
+        logits = outputs.logits
+
+        # 1. CE loss
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = all_labels[..., 1:].contiguous()
+        ce_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+
+        # 2. Impression-level softmax loss
+        scores = _extract_scores(logits, all_labels, self.yes_token_id, self.no_token_id)
+        scaled_scores = scores / self.temperature
+
+        softmax_loss = torch.tensor(0.0, device=logits.device)
+        offset = 0
+        num_groups = 0
+        for gs in group_sizes:
+            gs = int(gs.item())
+            if gs < 2:
+                offset += gs
+                continue
+
+            group_scores = scaled_scores[offset:offset + gs]       # (gs,)
+            group_labels = binary_labels[offset:offset + gs].float()  # (gs,)
+
+            if group_labels.sum() > 0 and group_labels.sum() < gs:
+                # Multi-label softmax: -log( Σ_clicked exp(s_i) / Σ_all exp(s_j) )
+                log_sum_all = torch.logsumexp(group_scores, dim=0)
+                # LogSumExp of only positive scores
+                pos_mask = group_labels.bool()
+                log_sum_pos = torch.logsumexp(group_scores[pos_mask], dim=0)
+
+                group_loss = log_sum_all - log_sum_pos
+                softmax_loss = softmax_loss + group_loss
+                num_groups += 1
+
+            offset += gs
+
+        if num_groups > 0:
+            softmax_loss = softmax_loss / num_groups
+
+        loss = ce_loss + self.ranking_weight * softmax_loss
+        return (loss, outputs) if return_outputs else loss
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         model.eval()
         with torch.no_grad():
             inputs = self._prepare_inputs(inputs)
@@ -342,6 +657,219 @@ class MINDPairwiseSFTDataset:
         }
 
 
+# ==================== Impression-Grouped Dataset (for LambdaRank / SoftmaxCE) ====================
+
+
+class MINDImpressionDataset:
+    """
+    MIND dataset grouped by impression for listwise ranking losses.
+
+    Each sample represents one impression with ALL candidates (pos + sampled neg).
+    Returns variable-length groups with padding to max_candidates_per_group.
+
+    Used by LambdaRank and SoftmaxCE trainers.
+    """
+
+    def __init__(
+        self,
+        behaviors_path,
+        news_path,
+        tokenizer,
+        max_len=2048,
+        sample=-1,
+        seed=42,
+        max_history=0,
+        neg_ratio=1.0,
+        max_candidates=20,  # Max candidates per impression (for memory)
+        use_abstract=False,
+        use_chat_template=False,
+    ):
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+        self.max_history = max_history if max_history > 0 else None
+        self.max_candidates = max_candidates
+        self.use_abstract = use_abstract
+        self.use_chat_template = use_chat_template
+        self.seed = seed
+
+        self.news = load_news(news_path, use_abstract=use_abstract)
+        self.impressions = self._load_impressions(behaviors_path, sample, neg_ratio)
+
+        total_candidates = sum(len(imp["candidates"]) for imp in self.impressions)
+        total_pos = sum(sum(imp["labels"]) for imp in self.impressions)
+        print(f"Loaded {len(self.impressions)} impressions, "
+              f"{total_candidates} total candidates, {total_pos} positives")
+
+    def _load_impressions(self, behaviors_path, sample_limit, neg_ratio):
+        all_impressions = []
+        rng = random.Random(self.seed)
+
+        with open(behaviors_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) < 5:
+                    continue
+
+                history_ids = parts[3].split()
+                imp_items = parts[4].split()
+
+                if self.max_history is not None:
+                    history_ids = history_ids[-self.max_history:]
+
+                history = [self.news[nid] for nid in history_ids if nid in self.news]
+
+                positives = []
+                negatives = []
+                for imp in imp_items:
+                    if "-" not in imp:
+                        continue
+                    news_id, label = imp.rsplit("-", 1)
+                    if news_id not in self.news:
+                        continue
+                    if int(label) == 1:
+                        positives.append(news_id)
+                    else:
+                        negatives.append(news_id)
+
+                if not positives or not negatives:
+                    continue
+
+                # Sample negatives based on neg_ratio
+                num_neg = min(int(len(positives) * neg_ratio), len(negatives))
+                num_neg = max(num_neg, 1)
+                sampled_neg = rng.sample(negatives, min(num_neg, len(negatives)))
+
+                # Combine and limit to max_candidates
+                candidates = []
+                labels = []
+                for pid in positives:
+                    candidates.append(self.news[pid])
+                    labels.append(1)
+                for nid in sampled_neg:
+                    candidates.append(self.news[nid])
+                    labels.append(0)
+
+                # Shuffle candidates within impression
+                combined = list(zip(candidates, labels))
+                rng.shuffle(combined)
+                candidates, labels = zip(*combined)
+                candidates = list(candidates)
+                labels = list(labels)
+
+                # Limit
+                if len(candidates) > self.max_candidates:
+                    candidates = candidates[:self.max_candidates]
+                    labels = labels[:self.max_candidates]
+
+                all_impressions.append({
+                    "history": history,
+                    "candidates": candidates,
+                    "labels": labels,
+                })
+
+        rng.shuffle(all_impressions)
+        if 0 < sample_limit < len(all_impressions):
+            all_impressions = all_impressions[:sample_limit]
+        return all_impressions
+
+    def _tokenize_candidate(self, history, candidate, label):
+        """Tokenize a single (history, candidate) pair."""
+        prompt = build_pointwise_prompt(
+            history,
+            candidate,
+            tokenizer=self.tokenizer if self.use_chat_template else None,
+            use_chat_template=self.use_chat_template,
+        )
+        target = " Yes" if label == 1 else " No"
+
+        if self.use_chat_template:
+            full_text = prompt + target
+            input_ids = self.tokenizer.encode(
+                full_text, max_length=self.max_len, truncation=True,
+                add_special_tokens=False,
+            )
+            prompt_ids = self.tokenizer.encode(
+                prompt, max_length=self.max_len, truncation=True,
+                add_special_tokens=False,
+            )
+        else:
+            full_text = prompt + target
+            input_ids = self.tokenizer.encode(
+                full_text, max_length=self.max_len, truncation=True,
+                add_special_tokens=True,
+            )
+            prompt_ids = self.tokenizer.encode(
+                prompt, max_length=self.max_len, truncation=True,
+                add_special_tokens=True,
+            )
+
+        train_labels = [-100] * len(prompt_ids) + input_ids[len(prompt_ids):]
+
+        # Pad
+        if len(input_ids) < self.max_len:
+            pad_len = self.max_len - len(input_ids)
+            input_ids = input_ids + [self.tokenizer.pad_token_id] * pad_len
+            train_labels = train_labels + [-100] * pad_len
+
+        return (
+            input_ids[:self.max_len],
+            train_labels[:self.max_len],
+            [1 if t != self.tokenizer.pad_token_id else 0 for t in input_ids[:self.max_len]],
+        )
+
+    def __len__(self):
+        return len(self.impressions)
+
+    def __getitem__(self, idx):
+        imp = self.impressions[idx]
+        history = imp["history"]
+
+        all_input_ids = []
+        all_labels = []
+        all_attention = []
+
+        for cand, label in zip(imp["candidates"], imp["labels"]):
+            ids, labs, attn = self._tokenize_candidate(history, cand, label)
+            all_input_ids.append(ids)
+            all_labels.append(labs)
+            all_attention.append(attn)
+
+        return {
+            "input_ids": torch.tensor(all_input_ids, dtype=torch.long),        # (C, L)
+            "labels": torch.tensor(all_labels, dtype=torch.long),              # (C, L)
+            "attention_mask": torch.tensor(all_attention, dtype=torch.long),    # (C, L)
+            "binary_labels": torch.tensor(imp["labels"], dtype=torch.long),    # (C,)
+            "group_sizes": torch.tensor([len(imp["candidates"])], dtype=torch.long),  # (1,)
+        }
+
+
+def impression_collate_fn(batch):
+    """
+    Custom collator for MINDImpressionDataset.
+    Flattens variable-size impression groups into a single batch with group_sizes tracking.
+    """
+    all_input_ids = []
+    all_labels = []
+    all_attention = []
+    all_binary_labels = []
+    group_sizes = []
+
+    for sample in batch:
+        all_input_ids.append(sample["input_ids"])
+        all_labels.append(sample["labels"])
+        all_attention.append(sample["attention_mask"])
+        all_binary_labels.append(sample["binary_labels"])
+        group_sizes.append(sample["group_sizes"])
+
+    return {
+        "input_ids": torch.cat(all_input_ids, dim=0),           # (total_C, L)
+        "labels": torch.cat(all_labels, dim=0),                 # (total_C, L)
+        "attention_mask": torch.cat(all_attention, dim=0),       # (total_C, L)
+        "binary_labels": torch.cat(all_binary_labels, dim=0),   # (total_C,)
+        "group_sizes": torch.cat(group_sizes, dim=0),           # (B,)
+    }
+
+
 def train(
     base_model: str = "",
     train_behaviors_path: str = "",
@@ -367,10 +895,13 @@ def train(
     wandb_run_id: str = "",
     deepspeed_config: str = "",
     use_chat_template: bool = None,  # Auto-detect if None
-    loss_type: str = "ce",  # "ce", "weighted_ce", "pairwise"
+    loss_type: str = "ce",  # "ce", "weighted_ce", "pairwise", "infonce", "lambdarank", "softmax_ce"
     label_smoothing: float = 0.0,  # Label smoothing factor (only for loss_type="ce")
     margin: float = 1.0,  # Margin for pairwise loss
     pos_weight: float = 2.0,  # Weight for positive (Yes) samples in weighted_ce
+    temperature: float = 0.1,  # Temperature for InfoNCE / SoftmaxCE
+    ranking_weight: float = 1.0,  # Weight of ranking loss vs CE loss (α)
+    max_candidates: int = 20,  # Max candidates per impression (lambdarank/softmax_ce)
 ):
     """Train with point-wise SFT format (Yes/No classification) using DeepSpeed"""
 
@@ -420,12 +951,15 @@ def train(
     no_token_id = tokenizer.encode(" No", add_special_tokens=False)[0]
 
     # Select dataset class based on loss type
+    impression_grouped = loss_type in ("lambdarank", "softmax_ce")
     if loss_type == "pairwise":
         DatasetClass = MINDPairwiseSFTDataset
+    elif impression_grouped:
+        DatasetClass = MINDImpressionDataset
     else:
         DatasetClass = MINDPointwiseSFTDataset
 
-    train_data = DatasetClass(
+    dataset_kwargs = dict(
         behaviors_path=train_behaviors_path,
         news_path=train_news_path,
         tokenizer=tokenizer,
@@ -437,8 +971,12 @@ def train(
         use_abstract=use_abstract,
         use_chat_template=use_chat_template,
     )
+    if impression_grouped:
+        dataset_kwargs["max_candidates"] = max_candidates
 
-    val_data = DatasetClass(
+    train_data = DatasetClass(**dataset_kwargs)
+
+    val_kwargs = dict(
         behaviors_path=eval_behaviors_path,
         news_path=eval_news_path,
         tokenizer=tokenizer,
@@ -450,6 +988,10 @@ def train(
         use_abstract=use_abstract,
         use_chat_template=use_chat_template,
     )
+    if impression_grouped:
+        val_kwargs["max_candidates"] = max_candidates
+
+    val_data = DatasetClass(**val_kwargs)
 
     print(f"\nTraining with Point-wise SFT ({loss_type}):")
     print(f"  Train samples: {len(train_data)}")
@@ -462,6 +1004,12 @@ def train(
         print(f"  Pos weight: {pos_weight}")
     elif loss_type == "pairwise":
         print(f"  Margin: {margin}")
+    elif loss_type == "infonce":
+        print(f"  Temperature: {temperature}, Ranking weight: {ranking_weight}")
+    elif loss_type == "lambdarank":
+        print(f"  Ranking weight: {ranking_weight}, Max candidates: {max_candidates}")
+    elif loss_type == "softmax_ce":
+        print(f"  Temperature: {temperature}, Ranking weight: {ranking_weight}, Max candidates: {max_candidates}")
     if label_smoothing > 0:
         print(f"  Label smoothing: {label_smoothing}")
     print(f"  Yes token ID: {yes_token_id}, No token ID: {no_token_id}")
@@ -498,8 +1046,8 @@ def train(
     if label_smoothing > 0 and loss_type == "ce":
         training_args_dict["label_smoothing_factor"] = label_smoothing
 
-    # Pairwise mode needs to keep custom column names
-    if loss_type == "pairwise":
+    # Pairwise and impression-grouped modes need to keep custom column names
+    if loss_type in ("pairwise", "lambdarank", "softmax_ce"):
         training_args_dict["remove_unused_columns"] = False
 
     # Add DeepSpeed config if provided
@@ -536,6 +1084,44 @@ def train(
             eval_dataset=val_data if val_data else None,
             args=training_args,
             data_collator=seq2seq_collator,
+            callbacks=callbacks,
+        )
+    elif loss_type == "infonce":
+        trainer = InfoNCETrainer(
+            temperature=temperature,
+            ranking_weight=ranking_weight,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            model=model,
+            train_dataset=train_data,
+            eval_dataset=val_data if val_data else None,
+            args=training_args,
+            data_collator=seq2seq_collator,
+            callbacks=callbacks,
+        )
+    elif loss_type == "lambdarank":
+        trainer = LambdaRankTrainer(
+            ranking_weight=ranking_weight,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            model=model,
+            train_dataset=train_data,
+            eval_dataset=val_data if val_data else None,
+            args=training_args,
+            data_collator=impression_collate_fn,
+            callbacks=callbacks,
+        )
+    elif loss_type == "softmax_ce":
+        trainer = SoftmaxCETrainer(
+            ranking_weight=ranking_weight,
+            temperature=temperature,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+            model=model,
+            train_dataset=train_data,
+            eval_dataset=val_data if val_data else None,
+            args=training_args,
+            data_collator=impression_collate_fn,
             callbacks=callbacks,
         )
     else:
