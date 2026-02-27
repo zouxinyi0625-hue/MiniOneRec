@@ -20,7 +20,9 @@ set -e
 # Configuration
 # =========================
 DATA_ROOT=${DATA_ROOT:-/home/aiscuser/MiniOneRec/data/MIND}
-SFT_MODEL=${SFT_MODEL:-output_dir/mind_ranking_ds/final_checkpoint}
+# SFT_MODEL: use the CoT format SFT checkpoint (from sft_mind_cot.sh),
+# or a HuggingFace model name for direct RL (not recommended without SFT).
+SFT_MODEL=${SFT_MODEL:-output_dir/sft_mind_cot/final_checkpoint}
 OUTPUT_DIR=${OUTPUT_DIR:-output_dir/rl_mind_cot}
 
 # CoT settings
