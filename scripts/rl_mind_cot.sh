@@ -25,7 +25,7 @@ OUTPUT_DIR=${OUTPUT_DIR:-output_dir/rl_mind_cot}
 
 # CoT settings
 COT_STYLE=${COT_STYLE:-standard}  # Options: standard, category, detailed
-REWARD_TYPE=${REWARD_TYPE:-mind_cot_binary}  # Options: mind_cot_binary, mind_cot_ndcg, mind_cot_auc, mind_cot_margin, mind_cot_format
+REWARD_TYPE=${REWARD_TYPE:-mind_cot_prob_auc}  # Options: mind_cot_prob_auc, mind_cot_prob_ndcg, mind_cot_prob_ce, mind_cot_prob_margin, mind_cot_prob_format (new prob-based); mind_cot_binary, mind_cot_ndcg, mind_cot_auc, mind_cot_margin, mind_cot_format (legacy single-answer)
 
 # Training settings
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-256}  # Longer for CoT reasoning

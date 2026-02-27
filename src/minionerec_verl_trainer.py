@@ -20,12 +20,18 @@ def _reward_name(reward_type):
         "pointwise_auc_proxy": "compute_score_pointwise_auc_proxy",
         "pointwise_margin": "compute_score_pointwise_margin",
         "pointwise_asymmetric": "compute_score_pointwise_asymmetric",
-        # Chain-of-Thought rewards
+        # Chain-of-Thought rewards (legacy single-answer)
         "mind_cot_binary": "compute_score_mind_cot_binary",
         "mind_cot_ndcg": "compute_score_mind_cot_ndcg",
         "mind_cot_auc": "compute_score_mind_cot_auc",
         "mind_cot_margin": "compute_score_mind_cot_margin",
         "mind_cot_format": "compute_score_mind_cot_format",
+        # Chain-of-Thought rewards (new prob-based <think>/<answer> format)
+        "mind_cot_prob_auc": "compute_score_mind_cot_prob_auc",
+        "mind_cot_prob_ndcg": "compute_score_mind_cot_prob_ndcg",
+        "mind_cot_prob_ce": "compute_score_mind_cot_prob_ce",
+        "mind_cot_prob_margin": "compute_score_mind_cot_prob_margin",
+        "mind_cot_prob_format": "compute_score_mind_cot_prob_format",
     }
     return mapping.get(reward_type, "compute_score_rule")
 

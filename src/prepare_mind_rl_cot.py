@@ -70,61 +70,87 @@ def build_cot_prompt(
             - "detailed": More detailed analysis
 
     Returns:
-        Chat-style prompt list for VERL
+        Chat-style prompt list for VERL.
+        System message defines the output format (<think> + <answer>).
+        User message contains history + candidates + style-specific instructions.
     """
+    # System prompt: role + task + output format (clear structure)
+    num_cands = len(candidates)
+    system_content = (
+        "[Role]\n"
+        "You are a news recommendation assistant.\n"
+        "\n"
+        "[Task]\n"
+        "Given a user's [Reading History] and a list of [Candidate Articles], "
+        "follow the [Instructions] to analyze user interests and predict "
+        "the click probability for each candidate article.\n"
+        "\n"
+        "[Output Format]\n"
+        "You MUST respond with exactly two sections:\n"
+        "\n"
+        "1. Reasoning section — wrap your step-by-step analysis in <think> tags:\n"
+        "   <think>\n"
+        "   ... your analysis here ...\n"
+        "   </think>\n"
+        "\n"
+        "2. Answer section — wrap the click probabilities in <answer> tags:\n"
+        "   <answer>\n"
+        f"   [1:prob, 2:prob, ..., {num_cands}:prob]\n"
+        "   </answer>\n"
+        "\n"
+        "[Output Rules]\n"
+        f"- You MUST list ALL {num_cands} candidates in the answer\n"
+        "- Each probability is a float between 0.0 and 1.0\n"
+        "- Higher probability = more likely to be clicked\n"
+        "- Probabilities do NOT need to sum to 1\n"
+        "- Do NOT output anything after </answer>\n"
+    )
+
+    # User prompt: structured with [Section] markers
     lines = []
 
-    # Task description
-    lines.append("You are a news recommendation assistant.")
-    lines.append("Your task is to predict which article a user will click based on their reading history.")
-    lines.append("")
-
     # User history
-    lines.append("=== User Reading History ===")
+    lines.append("[Reading History]")
     if history_items:
         for i, item in enumerate(history_items, 1):
-            cat = f"[{item.get('category', 'General')}]" if item.get('category') else ""
-            lines.append(f"{i}. {cat} {item['text']}")
+            cat = f"[{item.get('category', 'General')}] " if item.get('category') else ""
+            lines.append(f"{i}. {cat}{item['text']}")
     else:
         lines.append("(No reading history available)")
     lines.append("")
 
     # Candidate articles
-    lines.append("=== Candidate Articles ===")
+    lines.append("[Candidate Articles]")
     for i, cand in enumerate(candidates, 1):
-        cat = f"[{cand.get('category', 'General')}]" if cand.get('category') else ""
-        lines.append(f"{i}. {cat} {cand['text']}")
+        cat = f"[{cand.get('category', 'General')}] " if cand.get('category') else ""
+        lines.append(f"{i}. {cat}{cand['text']}")
     lines.append("")
 
     # CoT instruction based on style
     if cot_style == "category":
-        lines.append("=== Instructions ===")
-        lines.append("1. First, identify the main categories/topics in the user's reading history")
-        lines.append("2. Note any patterns (e.g., sports, politics, technology)")
-        lines.append("3. For each candidate, assess how well it matches the user's interests")
-        lines.append("4. Select the article most likely to be clicked")
-        lines.append("")
-        lines.append("Think step by step, then provide your final answer as: Answer: <number>")
+        lines.append("[Instructions]")
+        lines.append("Analyze the candidates based on category matching:")
+        lines.append("1. Identify the main categories/topics from [Reading History]")
+        lines.append("2. Note interest patterns (e.g., sports, politics, technology)")
+        lines.append("3. For each article in [Candidate Articles], assess category relevance")
+        lines.append("4. Assign click probability to EVERY candidate")
     elif cot_style == "detailed":
-        lines.append("=== Instructions ===")
-        lines.append("Analyze this recommendation task step by step:")
-        lines.append("")
-        lines.append("Step 1: Summarize the user's interests based on their reading history")
-        lines.append("Step 2: List the key topics/categories they seem interested in")
-        lines.append("Step 3: Evaluate each candidate article for relevance")
-        lines.append("Step 4: Identify the best match and explain why")
-        lines.append("")
-        lines.append("After your analysis, provide the final answer in this exact format:")
-        lines.append("Answer: <number>")
+        lines.append("[Instructions]")
+        lines.append("Perform a detailed analysis in four steps:")
+        lines.append("Step 1: Summarize user interests from [Reading History]")
+        lines.append("Step 2: List the key topics/categories the user prefers")
+        lines.append("Step 3: Evaluate each article in [Candidate Articles] for relevance")
+        lines.append("Step 4: Assign click probability to EVERY candidate")
     else:  # standard
-        lines.append("=== Instructions ===")
-        lines.append("Think step by step about what topics interest this user based on their history.")
-        lines.append("Then select the article they are most likely to click.")
-        lines.append("")
-        lines.append("Provide your reasoning, then give your final answer as: Answer: <number>")
+        lines.append("[Instructions]")
+        lines.append("Based on [Reading History], think step by step about what topics interest this user.")
+        lines.append("Then estimate the click probability for each article in [Candidate Articles].")
 
-    prompt = "\n".join(lines)
-    return [{"role": "user", "content": prompt}]
+    user_content = "\n".join(lines)
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def prepare_mind_for_rl_cot(
