@@ -30,11 +30,13 @@ REWARD_TYPE=${REWARD_TYPE:-mind_cot_prob_auc}  # Options: mind_cot_prob_auc, min
 # Training settings
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-256}  # Longer for CoT reasoning
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
-TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}  # Reduced for longer sequences
+TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}  # 8x A100-80GB can handle 128+ easily for 1.7B model
 LEARNING_RATE=${LEARNING_RATE:-1e-7}
 KL_LOSS_COEF=${KL_LOSS_COEF:-0.5}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1}
-NUM_GENERATIONS=${NUM_GENERATIONS:-4}  # Reduced for memory with longer responses
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}  # More generations = better GRPO advantage estimation
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-64}  # Actor update mini-batch
+PPO_MICRO_BATCH_SIZE=${PPO_MICRO_BATCH_SIZE:-4}  # Per-GPU micro-batch
 
 # Data settings
 MAX_HISTORY=${MAX_HISTORY:-30}
@@ -58,6 +60,9 @@ export NCCL_P2P_DISABLE=1
 export NCCL_SOCKET_IFNAME=eth0
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=7200
+
+# Disable uvloop to avoid asyncio event loop conflict with Ray/VERL
+export UVLOOP_DISABLE=1
 
 # =========================
 # Environment
@@ -119,6 +124,9 @@ echo "Output Dir: ${OUTPUT_DIR}"
 echo "Reward Type: ${REWARD_TYPE}"
 echo "Max Response Length: ${MAX_RESPONSE_LENGTH}"
 echo "Train Batch Size: ${TRAIN_BATCH_SIZE}"
+echo "PPO Mini Batch: ${PPO_MINI_BATCH_SIZE}"
+echo "PPO Micro Batch/GPU: ${PPO_MICRO_BATCH_SIZE}"
+echo "Num Generations: ${NUM_GENERATIONS}"
 echo "Learning Rate: ${LEARNING_RATE}"
 echo "KL Coefficient: ${KL_LOSS_COEF}"
 echo "GPUs: ${N_GPUS}"
@@ -138,6 +146,8 @@ python src/rl_mind_verl.py \
     --kl_loss_coef ${KL_LOSS_COEF} \
     --total_epochs ${TOTAL_EPOCHS} \
     --num_generations ${NUM_GENERATIONS} \
+    --ppo_mini_batch_size ${PPO_MINI_BATCH_SIZE} \
+    --ppo_micro_batch_size_per_gpu ${PPO_MICRO_BATCH_SIZE} \
     --n_gpus_per_node ${N_GPUS} \
     --wandb_project ${WANDB_PROJECT} \
     --wandb_run_name ${WANDB_RUN_NAME}
