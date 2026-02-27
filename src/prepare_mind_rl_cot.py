@@ -11,17 +11,28 @@ Key differences from prepare_mind_rl.py:
 - Reward functions in verl_reward.py extract answer from CoT output
 
 Usage:
-    python prepare_mind_rl_cot.py \
-        --behaviors_path ../data/MIND/train/behaviors.tsv \
-        --news_path ../data/MIND/train/news.tsv \
-        --output_parquet ../data/MIND/train/rl_cot_train.parquet \
-        --max_history 30 \
-        --use_abstract False
+    # Option 1: Use MIND_ROOT env var (recommended)
+    MIND_ROOT=/path/to/MIND_small python prepare_mind_rl_cot.py \\
+        --split train \\
+        --output_parquet /path/to/rl_cot_train.parquet
+
+    # Option 2: Use --mind_root argument
+    python prepare_mind_rl_cot.py \\
+        --mind_root /path/to/MIND_small \\
+        --split train \\
+        --output_parquet /path/to/rl_cot_train.parquet
+
+    # Option 3: Explicit paths (legacy)
+    python prepare_mind_rl_cot.py \\
+        --behaviors_path ../data/MIND/train/behaviors.tsv \\
+        --news_path ../data/MIND/train/news.tsv \\
+        --output_parquet ../data/MIND/train/rl_cot_train.parquet
 
 Author: MiniOneRec
 """
 
 import argparse
+import os
 import random
 from typing import Dict, List
 import pandas as pd
@@ -386,9 +397,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Prepare MIND dataset for VERL RL training with CoT"
     )
-    parser.add_argument('--behaviors_path', required=True)
-    parser.add_argument('--news_path', required=True)
-    parser.add_argument('--output_parquet', required=True)
+    # Path options: either --mind_root + --split, or explicit --behaviors_path + --news_path
+    parser.add_argument('--mind_root', type=str, default=None,
+                        help='Root directory of MIND dataset. Can also be set via MIND_ROOT env var. '
+                             'Paths are derived as {mind_root}/{split}/behaviors.tsv and news.tsv')
+    parser.add_argument('--split', type=str, default='train', choices=['train', 'dev', 'test'],
+                        help='Dataset split (used with --mind_root)')
+    parser.add_argument('--behaviors_path', type=str, default=None,
+                        help='Explicit path to behaviors.tsv (overrides --mind_root)')
+    parser.add_argument('--news_path', type=str, default=None,
+                        help='Explicit path to news.tsv (overrides --mind_root)')
+    parser.add_argument('--output_parquet', type=str, default=None,
+                        help='Output parquet path. If not set, defaults to {mind_root}/{split}/rl_cot_{split}.parquet')
     parser.add_argument('--max_history', type=int, default=30)
     parser.add_argument('--max_candidates', type=int, default=50)
     parser.add_argument('--min_candidates', type=int, default=2)
@@ -400,10 +420,35 @@ def main():
 
     args = parser.parse_args()
 
+    # Resolve MIND_ROOT: arg > env var
+    mind_root = args.mind_root or os.environ.get('MIND_ROOT', None)
+
+    # Resolve behaviors_path and news_path
+    behaviors_path = args.behaviors_path
+    news_path = args.news_path
+    output_parquet = args.output_parquet
+
+    if behaviors_path is None or news_path is None:
+        if mind_root is None:
+            parser.error(
+                'Must provide either --mind_root (or MIND_ROOT env var) with --split, '
+                'or explicit --behaviors_path and --news_path'
+            )
+        split_dir = os.path.join(mind_root, args.split)
+        if behaviors_path is None:
+            behaviors_path = os.path.join(split_dir, 'behaviors.tsv')
+        if news_path is None:
+            news_path = os.path.join(split_dir, 'news.tsv')
+        if output_parquet is None:
+            output_parquet = os.path.join(split_dir, f'rl_cot_{args.split}.parquet')
+
+    if output_parquet is None:
+        parser.error('Must provide --output_parquet when not using --mind_root')
+
     prepare_mind_for_rl_cot(
-        behaviors_path=args.behaviors_path,
-        news_path=args.news_path,
-        output_parquet=args.output_parquet,
+        behaviors_path=behaviors_path,
+        news_path=news_path,
+        output_parquet=output_parquet,
         max_history=args.max_history,
         use_abstract=args.use_abstract,
         max_samples=args.max_samples,
