@@ -106,7 +106,14 @@ def build_cot_prompt(
         "\n"
         "2. Answer section — wrap the click probabilities in <answer> tags:\n"
         "   <answer>\n"
-        f"   [1:prob, 2:prob, ..., {num_cands}:prob]\n"
+    )
+    # Build example format adaptively to avoid confusing patterns like [1:prob, 2:prob, ..., 2:prob]
+    if num_cands <= 3:
+        prob_example = ", ".join(f"{i}:prob" for i in range(1, num_cands + 1))
+    else:
+        prob_example = f"1:prob, 2:prob, ..., {num_cands}:prob"
+    system_content += (
+        f"   [{prob_example}]\n"
         "   </answer>\n"
         "\n"
         "[Output Rules]\n"
