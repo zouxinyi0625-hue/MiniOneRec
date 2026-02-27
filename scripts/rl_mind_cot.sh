@@ -44,9 +44,10 @@ MAX_SAMPLES=${MAX_SAMPLES:-0}  # 0 = use all
 # Hardware
 N_GPUS=${N_GPUS:-8}
 
-# WandB
+# WandB (set WANDB_API_KEY env var before running)
 WANDB_PROJECT=${WANDB_PROJECT:-MiniOneRec_MIND}
-WANDB_RUN_NAME=${WANDB_RUN_NAME:-rl_mind_cot_${REWARD_TYPE}}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-cot_${REWARD_TYPE}_lr${LEARNING_RATE}_kl${KL_LOSS_COEF}_bs${TRAIN_BATCH_SIZE}_g${NUM_GENERATIONS}_r${MAX_RESPONSE_LENGTH}}
+export WANDB_API_KEY=${WANDB_API_KEY:?"WANDB_API_KEY not set. Export it before running."}
 
 # =========================
 # NCCL Configuration
