@@ -977,14 +977,24 @@ def _check_cot_format(solution_str):
 
 def compute_score_mind_cot_prob_auc(data_source, solution_str, ground_truth, extra_info=None):
     """
-    AUC reward based on predicted click probabilities.
+    Combined format + AUC reward for CoT prob-based output.
 
-    Computes AUC: for each (clicked, non-clicked) pair, reward += 1 if
-    predicted_prob(clicked) > predicted_prob(non-clicked).
-    Normalized to [0, 1].
+    Reward = format_reward + auc_reward
+      - format_reward (0.0 ~ 0.3):
+          +0.1 for valid <think>...</think> with reasoning (>20 chars)
+          +0.1 for valid <answer>...</answer> with parseable probs
+          +0.1 for full coverage (all candidates have probs)
+      - auc_reward (0.0 ~ 0.7):
+          AUC score scaled to [0, 0.7]
 
-    Returns:
-        float: AUC score in [0, 1], or 0.0 if format is invalid.
+    Total reward range: [0.0, 1.0]
+    - Format completely wrong: 0.0
+    - Format perfect but AUC=0: 0.3
+    - Format perfect and AUC=1: 1.0
+
+    AUC computation: for each (clicked, non-clicked) pair, score += 1 if
+    predicted_prob(clicked) > predicted_prob(non-clicked), += 0.5 if equal.
+    Normalized to [0, 1], then scaled by 0.7.
     """
     if not extra_info or 'labels' not in extra_info:
         return 0.0
@@ -992,36 +1002,53 @@ def compute_score_mind_cot_prob_auc(data_source, solution_str, ground_truth, ext
     labels = extra_info.get('labels', [])
     num_candidates = extra_info.get('num_candidates', len(labels))
 
-    probs = extract_cot_probs(solution_str, num_candidates)
-    if not probs:
-        return 0.0
+    # --- Format reward (up to 0.3) ---
+    format_reward = 0.0
+    text = str(solution_str).strip() if solution_str else ""
 
-    # Collect clicked and non-clicked probs
-    clicked_probs = []
-    non_clicked_probs = []
-    for i, label in enumerate(labels):
-        cid = i + 1  # 1-indexed
-        p = probs.get(cid, 0.0)  # Default to 0 if candidate not mentioned
-        if label == 1:
-            clicked_probs.append(p)
-        else:
-            non_clicked_probs.append(p)
+    # +0.1 for valid <think>...</think> with non-trivial reasoning
+    think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
+    if think_match and len(think_match.group(1).strip()) > 20:
+        format_reward += 0.1
 
-    if not clicked_probs or not non_clicked_probs:
-        return 0.0
+    # Parse probs
+    probs = extract_cot_probs(text, num_candidates)
 
-    # Compute AUC: fraction of (pos, neg) pairs correctly ordered
-    correct = 0
-    total = 0
-    for cp in clicked_probs:
-        for np_ in non_clicked_probs:
-            total += 1
-            if cp > np_:
-                correct += 1
-            elif cp == np_:
-                correct += 0.5
+    # +0.1 for valid <answer>...</answer> with parseable probs
+    if probs:
+        format_reward += 0.1
 
-    return correct / total if total > 0 else 0.0
+    # +0.1 for full coverage (all candidates have probs)
+    if probs and len(probs) >= num_candidates:
+        format_reward += 0.1
+
+    # --- AUC reward (up to 0.7) ---
+    auc_reward = 0.0
+    if probs:
+        clicked_probs = []
+        non_clicked_probs = []
+        for i, label in enumerate(labels):
+            cid = i + 1  # 1-indexed
+            p = probs.get(cid, 0.0)
+            if label == 1:
+                clicked_probs.append(p)
+            else:
+                non_clicked_probs.append(p)
+
+        if clicked_probs and non_clicked_probs:
+            correct = 0
+            total = 0
+            for cp in clicked_probs:
+                for np_ in non_clicked_probs:
+                    total += 1
+                    if cp > np_:
+                        correct += 1
+                    elif cp == np_:
+                        correct += 0.5
+            raw_auc = correct / total if total > 0 else 0.0
+            auc_reward = raw_auc * 0.7  # Scale to [0, 0.7]
+
+    return format_reward + auc_reward
 
 
 def compute_score_mind_cot_prob_ndcg(data_source, solution_str, ground_truth, extra_info=None):
