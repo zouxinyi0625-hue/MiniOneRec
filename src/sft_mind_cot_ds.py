@@ -412,6 +412,9 @@ def train(
     # Training arguments
     eval_step = max(1, len(train_data) // (batch_size * 4))  # ~4 evals per epoch
     save_step = max(1, len(train_data) // (batch_size * 2))  # ~2 saves per epoch
+    # Ensure save_step is a round multiple of eval_step (required by load_best_model_at_end)
+    if val_data and eval_step > 0:
+        save_step = max(eval_step, (save_step // eval_step) * eval_step)
 
     training_args_dict = {
         "per_device_train_batch_size": micro_batch_size,
