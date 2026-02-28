@@ -163,7 +163,7 @@ def main():
     parser.add_argument("--num_samples", type=int, default=3, help="Number of samples to test")
     parser.add_argument("--max_history", type=int, default=30)
     parser.add_argument("--max_candidates", type=int, default=15, help="Smaller for readability")
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--max_new_tokens", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

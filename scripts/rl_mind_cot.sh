@@ -30,7 +30,7 @@ COT_STYLE=${COT_STYLE:-standard}  # Options: standard, category, detailed
 REWARD_TYPE=${REWARD_TYPE:-mind_cot_prob_auc}  # Options: mind_cot_prob_auc, mind_cot_prob_ndcg, mind_cot_prob_ce, mind_cot_prob_margin, mind_cot_prob_format (new prob-based); mind_cot_binary, mind_cot_ndcg, mind_cot_auc, mind_cot_margin, mind_cot_format (legacy single-answer)
 
 # Training settings
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-256}  # Longer for CoT reasoning
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}  # Must be large enough for think + answer with 30 candidates
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-4096}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-128}  # 8x A100-80GB can handle 128+ easily for 1.7B model
 LEARNING_RATE=${LEARNING_RATE:-1e-7}
