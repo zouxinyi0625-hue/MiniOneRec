@@ -80,8 +80,8 @@ echo "=========================================="
 echo "Step 1: Preparing CoT RL Data"
 echo "=========================================="
 
-TRAIN_PARQUET=${DATA_ROOT}/train/rl_cot_train.parquet
-EVAL_PARQUET=${DATA_ROOT}/dev/rl_cot_dev.parquet
+TRAIN_PARQUET=${TRAIN_PARQUET:-${DATA_ROOT}/train/rl_cot_train.parquet}
+EVAL_PARQUET=${EVAL_PARQUET:-${DATA_ROOT}/dev/rl_cot_dev.parquet}
 
 # Prepare training data if not exists
 if [ ! -f "$TRAIN_PARQUET" ]; then
