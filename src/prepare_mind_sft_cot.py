@@ -14,14 +14,14 @@ The synthetic reasoning is template-based:
 Usage:
     # Prepare SFT data from MIND dataset
     MIND_ROOT=/path/to/MIND_small python src/prepare_mind_sft_cot.py \
-        --split train --output sft_cot_train.jsonl --max_samples 2000
+        --split train --output sft_cot_train.jsonl --max_samples 5000
 
     # Or with explicit paths
     python src/prepare_mind_sft_cot.py \
         --behaviors_path /path/to/behaviors.tsv \
         --news_path /path/to/news.tsv \
         --output sft_cot_data.jsonl \
-        --max_samples 2000
+        --max_samples 5000
 """
 
 import argparse
@@ -249,7 +249,7 @@ def prepare_sft_cot_data(
     max_history: int = 30,
     max_candidates: int = 30,
     min_candidates: int = 2,
-    max_samples: int = 2000,
+    max_samples: int = 5000,
     cot_style: str = "standard",
     use_abstract: bool = False,
     seed: int = 42,
@@ -398,8 +398,8 @@ def main():
     parser.add_argument('--max_history', type=int, default=30)
     parser.add_argument('--max_candidates', type=int, default=30)
     parser.add_argument('--min_candidates', type=int, default=2)
-    parser.add_argument('--max_samples', type=int, default=2000,
-                        help='Number of SFT samples to generate (default: 2000)')
+    parser.add_argument('--max_samples', type=int, default=5000,
+                        help='Number of SFT samples to generate (default: 5000)')
     parser.add_argument('--cot_style', choices=['standard', 'category', 'detailed'],
                         default='standard')
     parser.add_argument('--use_abstract', action='store_true')

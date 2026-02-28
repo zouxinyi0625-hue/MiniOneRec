@@ -27,7 +27,7 @@ MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-1.7B}
 OUTPUT_DIR=${OUTPUT_DIR:-output_dir/sft_mind_cot}
 
 # SFT data generation settings
-SFT_MAX_SAMPLES=${SFT_MAX_SAMPLES:-2000}   # How many synthetic samples to generate
+SFT_MAX_SAMPLES=${SFT_MAX_SAMPLES:-5000}   # How many synthetic samples to generate
 COT_STYLE=${COT_STYLE:-standard}
 MAX_HISTORY=${MAX_HISTORY:-30}
 MAX_CANDIDATES=${MAX_CANDIDATES:-30}
