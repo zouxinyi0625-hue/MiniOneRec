@@ -38,7 +38,7 @@ NUM_GENERATIONS=${NUM_GENERATIONS:-4}  # Reduced for memory with longer response
 
 # Data settings
 MAX_HISTORY=${MAX_HISTORY:-30}
-MAX_CANDIDATES=${MAX_CANDIDATES:-30}
+MAX_CANDIDATES=${MAX_CANDIDATES:-10}
 MAX_SAMPLES=${MAX_SAMPLES:-0}  # 0 = use all
 
 # Hardware
@@ -46,7 +46,7 @@ N_GPUS=${N_GPUS:-8}
 
 # WandB
 WANDB_PROJECT=${WANDB_PROJECT:-MiniOneRec_MIND}
-WANDB_RUN_NAME=${WANDB_RUN_NAME:-rl_mind_cot_${REWARD_TYPE}}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-simple_cot_${REWARD_TYPE}_cand${MAX_CANDIDATES}_gen${NUM_GENERATIONS}_bs${TRAIN_BATCH_SIZE}_lr${LEARNING_RATE}_kl${KL_LOSS_COEF}_resp${MAX_RESPONSE_LENGTH}}
 
 # =========================
 # NCCL Configuration
@@ -78,7 +78,7 @@ EVAL_PARQUET=${DATA_ROOT}/dev/rl_cot_dev.parquet
 # Prepare training data if not exists
 if [ ! -f "$TRAIN_PARQUET" ]; then
     echo "Preparing training data..."
-    python prepare_mind_rl_cot.py \
+    python src/prepare_mind_rl_cot.py \
         --behaviors_path ${DATA_ROOT}/train/behaviors.tsv \
         --news_path ${DATA_ROOT}/train/news.tsv \
         --output_parquet ${TRAIN_PARQUET} \
@@ -93,7 +93,7 @@ fi
 # Prepare evaluation data if not exists
 if [ ! -f "$EVAL_PARQUET" ]; then
     echo "Preparing evaluation data..."
-    python prepare_mind_rl_cot.py \
+    python src/prepare_mind_rl_cot.py \
         --behaviors_path ${DATA_ROOT}/dev/behaviors.tsv \
         --news_path ${DATA_ROOT}/dev/news.tsv \
         --output_parquet ${EVAL_PARQUET} \

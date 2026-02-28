@@ -873,10 +873,13 @@ def extract_cot_answer(solution_str, num_candidates=None):
 
 def compute_score_mind_cot_binary(data_source, solution_str, ground_truth, extra_info=None):
     """
-    Binary reward for Chain-of-Thought list-wise ranking.
+    Shaped reward for Chain-of-Thought list-wise ranking.
 
-    The model generates reasoning followed by an answer number.
-    Reward is 1.0 if the answer matches the clicked item, 0.0 otherwise.
+    Provides graduated rewards to reduce sparsity:
+    - 0.0: No valid answer extracted (garbage output)
+    - 0.1: Valid answer extracted but wrong (format learned)
+    - 0.3: Wrong answer but same category as a clicked item (reasoning close)
+    - 1.0: Predicted item was clicked (fully correct)
 
     Args:
         data_source: Not used (kept for API compatibility)
@@ -884,15 +887,12 @@ def compute_score_mind_cot_binary(data_source, solution_str, ground_truth, extra
         ground_truth: Ground truth clicked index (1-indexed, as string or int)
         extra_info: Optional dict containing:
             - 'num_candidates': int - total number of candidates
-            - 'clicked_idx': int - 1-indexed position of clicked item
+            - 'clicked_idx': int - 1-indexed position of first clicked item
+            - 'labels': List[int] - binary labels for all candidates (1=clicked)
+            - 'categories': List[str] - category of each candidate (optional)
 
     Returns:
-        float: 1.0 if correct, 0.0 if incorrect
-
-    Example:
-        Model output: "The user likes sports. Candidate 2 is about NBA. Answer: 2"
-        Ground truth: "2" (or clicked_idx=2 in extra_info)
-        Returns: 1.0
+        float: Reward in {0.0, 0.1, 0.3, 1.0}
     """
     # Get number of candidates for validation
     num_candidates = None
@@ -902,18 +902,35 @@ def compute_score_mind_cot_binary(data_source, solution_str, ground_truth, extra
     # Extract predicted answer
     predicted = extract_cot_answer(solution_str, num_candidates)
     if predicted is None:
-        return 0.0
+        return 0.0  # No valid answer → no reward
 
-    # Get ground truth
+    # --- Check correctness via labels (supports multiple clicked) ---
+    if extra_info and 'labels' in extra_info:
+        labels = extra_info['labels']
+        if 1 <= predicted <= len(labels):
+            if labels[predicted - 1] == 1:
+                return 1.0  # Correct: predicted a clicked item
+
+            # Wrong answer, but check category proximity
+            categories = extra_info.get('categories', [])
+            if categories and len(categories) == len(labels):
+                pred_cat = categories[predicted - 1]
+                # Get categories of all clicked items
+                clicked_cats = {categories[i] for i, l in enumerate(labels) if l == 1}
+                if pred_cat and pred_cat in clicked_cats:
+                    return 0.3  # Same category as a clicked item
+
+            return 0.1  # Valid format but wrong answer
+        return 0.0  # Out of range
+
+    # --- Fallback: single clicked_idx ---
     target = None
     if extra_info and 'clicked_idx' in extra_info:
         target = extra_info.get('clicked_idx')
     elif ground_truth:
-        # Parse ground truth as number
         try:
             target = int(str(ground_truth).strip())
         except ValueError:
-            # Try to extract number from ground truth
             match = re.search(r'(\d+)', str(ground_truth))
             if match:
                 target = int(match.group(1))
@@ -921,7 +938,16 @@ def compute_score_mind_cot_binary(data_source, solution_str, ground_truth, extra
     if target is None:
         return 0.0
 
-    return 1.0 if predicted == target else 0.0
+    if predicted == target:
+        return 1.0
+
+    # Category check for fallback path
+    categories = extra_info.get('categories', []) if extra_info else []
+    if categories and 1 <= predicted <= len(categories) and 1 <= target <= len(categories):
+        if categories[predicted - 1] and categories[predicted - 1] == categories[target - 1]:
+            return 0.3
+
+    return 0.1  # Valid format but wrong
 
 
 def compute_score_mind_cot_ndcg(data_source, solution_str, ground_truth, extra_info=None):
