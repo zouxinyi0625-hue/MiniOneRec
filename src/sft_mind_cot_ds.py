@@ -23,6 +23,7 @@ import os
 import sys
 import json
 import random
+import re
 import math
 from functools import partial
 
@@ -101,10 +102,20 @@ class MINDCoTSFTDataset:
 
     def _tokenize(self, item):
         """
-        Tokenize a chat message sample.
-        
-        Returns dict with input_ids, labels, attention_mask.
-        Labels are -100 for prompt tokens (only assistant response is supervised).
+        Tokenize a chat message sample with selective loss masking.
+
+        Loss masking strategy (compromise approach):
+        - Prompt (system + user):  -100  (no loss)
+        - "<think>\n":             SUPERVISED (learn to open think tag)
+        - reasoning content:       -100  (no loss — avoid template pollution,
+                                          RL will learn reasoning freely)
+        - "\n</think>\n":          SUPERVISED (learn to close think tag)
+        - "<answer>...</answer>":  SUPERVISED (learn the prob format strictly)
+        - EOS:                     SUPERVISED
+
+        This teaches the model the structural skeleton:
+            <think> → (free reasoning) → </think> → <answer>[1:p, ...]</answer>
+        without overfitting to synthetic reasoning templates.
         """
         messages = item["messages"]
 
@@ -115,6 +126,8 @@ class MINDCoTSFTDataset:
         if assistant_message is None:
             return None
 
+        assistant_content = assistant_message["content"]
+
         # Tokenize prompt (system + user) using chat template
         prompt_text = self.tokenizer.apply_chat_template(
             prompt_messages,
@@ -123,7 +136,7 @@ class MINDCoTSFTDataset:
         )
 
         # Full text = prompt + assistant response + EOS
-        full_text = prompt_text + assistant_message["content"] + self.tokenizer.eos_token
+        full_text = prompt_text + assistant_content + self.tokenizer.eos_token
 
         # Tokenize full text
         full_encoding = self.tokenizer(
@@ -137,24 +150,57 @@ class MINDCoTSFTDataset:
         input_ids = full_encoding["input_ids"].squeeze(0)
         attention_mask = full_encoding["attention_mask"].squeeze(0)
 
-        # Check if truncated  
-        actual_len = attention_mask.sum().item()
+        # Check if truncated
         full_len = len(self.tokenizer.encode(full_text, add_special_tokens=False))
         if full_len > self.max_len:
             return None  # Skip truncated samples
 
-        # Find prompt length to create labels
-        prompt_encoding = self.tokenizer(
-            prompt_text,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )
-        prompt_len = prompt_encoding["input_ids"].shape[1]
+        # ============================================================
+        # Build labels with selective masking
+        # ============================================================
+        # Strategy: compute token boundaries for each segment of the response,
+        # then selectively set labels to -100 for segments we don't want to supervise.
 
-        # Labels: -100 for prompt tokens, copy input_ids for response tokens
-        labels = input_ids.clone()
-        labels[:prompt_len] = -100
-        # Also mask padding tokens
+        # 1) prompt_len: everything before assistant response
+        prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=False)
+        prompt_len = len(prompt_ids)
+
+        # 2) Parse the assistant response into segments:
+        #    "<think>\n" | reasoning_content | "\n</think>\n" | answer_and_rest
+        #
+        # The response format from prepare_mind_sft_cot.py:
+        #    "<think>\n{reasoning}\n</think>\n<answer>\n[{prob_str}]\n</answer>"
+        think_match = re.search(r'(<think>\n)(.*?)(\n</think>\n)', assistant_content, re.DOTALL)
+
+        if think_match:
+            # Positions within assistant_content
+            think_open = assistant_content[:think_match.end(1)]    # "<think>\n"
+            reasoning = think_match.group(2)                        # reasoning content
+            think_close_and_rest = assistant_content[think_match.start(3):]  # "\n</think>\n<answer>..."
+
+            # Tokenize each segment to find token boundaries
+            think_open_ids = self.tokenizer.encode(
+                prompt_text + think_open, add_special_tokens=False
+            )
+            reasoning_end_ids = self.tokenizer.encode(
+                prompt_text + think_open + reasoning, add_special_tokens=False
+            )
+
+            think_open_end = len(think_open_ids)     # token index where reasoning starts
+            reasoning_end = len(reasoning_end_ids)   # token index where reasoning ends
+
+            # Build labels
+            labels = input_ids.clone()
+            labels[:prompt_len] = -100               # mask prompt
+            # labels[prompt_len:think_open_end]      # "<think>\n" — SUPERVISED (kept)
+            labels[think_open_end:reasoning_end] = -100  # reasoning content — MASKED
+            # labels[reasoning_end:]                 # "</think>\n<answer>...</answer>" — SUPERVISED (kept)
+        else:
+            # Fallback: no <think> tags found — supervise entire response
+            labels = input_ids.clone()
+            labels[:prompt_len] = -100
+
+        # Mask padding tokens
         labels[attention_mask == 0] = -100
 
         return {
@@ -171,10 +217,17 @@ class MINDCoTSFTDataset:
 
 
 def verify_tokenization(dataset, num_samples=3):
-    """Quick verification that labels are correct."""
+    """Quick verification that labels are correctly masked."""
     print("=" * 70)
-    print("Tokenization Verification")
+    print("Tokenization Verification (selective masking)")
     print("=" * 70)
+    print("  Masking strategy:")
+    print("    prompt            → -100 (no loss)")
+    print("    <think>\\n         → SUPERVISED")
+    print("    reasoning content → -100 (no loss)")
+    print("    \\n</think>\\n      → SUPERVISED")
+    print("    <answer>...</answer> → SUPERVISED")
+    print()
 
     for i in range(min(num_samples, len(dataset))):
         item = dataset[i]
@@ -184,22 +237,32 @@ def verify_tokenization(dataset, num_samples=3):
 
         seq_len = attention_mask.sum().item()
         num_target = sum(1 for l in labels if l != -100)
-        num_prompt = seq_len - num_target
+        num_masked = seq_len - num_target
 
-        # Decode target tokens
+        # Decode supervised tokens
         target_ids = [input_ids[j].item() for j in range(len(labels)) if labels[j] != -100]
         target_text = dataset.tokenizer.decode(target_ids)
 
-        print(f"  Sample {i}: seq_len={seq_len}, prompt={num_prompt}, target={num_target}")
+        # Decode masked reasoning tokens (within response, not prompt)
+        # Find first non -100 label to estimate prompt end
+        all_ids = input_ids.tolist()
 
-        # Check that target contains the expected format
-        has_think = "<think>" in target_text
+        print(f"  Sample {i}: seq_len={seq_len}, supervised={num_target}, masked={num_masked}")
+
+        # Check structural tags
+        has_think_open = "<think>" in target_text
+        has_think_close = "</think>" in target_text
         has_answer = "<answer>" in target_text
-        print(f"    has <think>: {has_think}, has <answer>: {has_answer}")
-        if not has_think or not has_answer:
-            print(f"    WARNING: Missing format tags! Target text: {target_text[:200]}")
+        has_answer_close = "</answer>" in target_text
+        print(f"    tags: <think>={has_think_open} </think>={has_think_close} "
+              f"<answer>={has_answer} </answer>={has_answer_close}")
+
+        if not all([has_think_open, has_think_close, has_answer, has_answer_close]):
+            print(f"    WARNING: Missing format tags!")
+            print(f"    Supervised text: {target_text[:300]}")
         else:
-            print(f"    Target preview: {target_text[:150]}...")
+            # Show what's supervised (should be tags + answer, NOT reasoning)
+            print(f"    Supervised text preview: {target_text[:200]}...")
 
     print("=" * 70)
     print()
