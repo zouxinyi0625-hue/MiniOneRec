@@ -58,6 +58,9 @@ export NCCL_SOCKET_IFNAME=eth0
 export NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_TIMEOUT=7200
 
+# Disable uvloop (conflicts with VERL/vLLM event loop)
+export UVLOOP_DISABLE=1
+
 # =========================
 # Environment
 # =========================
