@@ -799,6 +799,177 @@ def compute_score_pointwise_margin(data_source, solution_str, ground_truth, extr
 
 
 # =============================================================================
+# POINTWISE CHAIN-OF-THOUGHT (COT) REWARD FUNCTIONS
+# =============================================================================
+# Format: model outputs <think>reasoning</think><answer>Yes/No</answer>
+# Each sample is a single (history, candidate) pair.
+# Reward combines format correctness with prediction accuracy.
+
+
+def _extract_cot_pointwise_answer(solution_str: str):
+    """
+    Extract Yes/No answer from CoT pointwise output.
+
+    Returns:
+        tuple: (pred_yes: bool or None, has_think: bool, think_len: int, has_answer_tag: bool)
+    """
+    if not solution_str:
+        return None, False, 0, False
+
+    text = str(solution_str).strip()
+
+    # Check for <think> section
+    think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
+    has_think = think_match is not None
+    think_len = len(think_match.group(1).strip()) if think_match else 0
+
+    # Extract from <answer> tags
+    answer_match = re.search(r'<answer>\s*(Yes|No)\s*</answer>', text, re.IGNORECASE)
+    has_answer_tag = answer_match is not None
+
+    if answer_match:
+        pred_yes = answer_match.group(1).strip().lower() == 'yes'
+        return pred_yes, has_think, think_len, has_answer_tag
+
+    # Fallback: look after </think> for Yes/No
+    if '</think>' in text:
+        after_think = text.split('</think>', 1)[1].strip()
+        if re.search(r'\byes\b', after_think, re.IGNORECASE):
+            return True, has_think, think_len, False
+        elif re.search(r'\bno\b', after_think, re.IGNORECASE):
+            return False, has_think, think_len, False
+
+    # Last resort: any Yes/No in text
+    if re.search(r'\byes\b', text, re.IGNORECASE):
+        return True, has_think, think_len, False
+    elif re.search(r'\bno\b', text, re.IGNORECASE):
+        return False, has_think, think_len, False
+
+    return None, has_think, think_len, False
+
+
+def compute_score_cot_pointwise_binary(data_source, solution_str, ground_truth, extra_info=None):
+    """
+    Simple binary reward for pointwise CoT.
+
+    - Correct Yes/No prediction: 1.0
+    - Wrong prediction: 0.0
+    - Unparseable output: 0.0
+
+    No format reward — purely accuracy-based.
+    """
+    pred_yes, _, _, _ = _extract_cot_pointwise_answer(solution_str)
+    if pred_yes is None:
+        return 0.0
+
+    label = 0
+    if extra_info:
+        label = extra_info.get('label', 0)
+    else:
+        target = str(ground_truth).strip().lower()
+        label = 1 if 'yes' in target else 0
+
+    target_yes = (label == 1)
+    return 1.0 if pred_yes == target_yes else 0.0
+
+
+def compute_score_cot_pointwise_format(data_source, solution_str, ground_truth, extra_info=None):
+    """
+    Combined format + accuracy reward for pointwise CoT.
+
+    Reward = format_reward (0~0.3) + accuracy_reward (0~0.7)
+
+    format_reward:
+        +0.1 for valid <think>...</think> with reasoning (>20 chars)
+        +0.1 for valid <answer>Yes/No</answer> tag
+        +0.1 for reasonable think length (20-500 chars — not too short, not too verbose)
+
+    accuracy_reward:
+        +0.7 for correct Yes/No prediction
+
+    Total range: [0.0, 1.0]
+    - Format wrong, prediction wrong: 0.0
+    - Format perfect, prediction wrong: 0.3
+    - Format wrong, prediction right: 0.7
+    - Format perfect, prediction right: 1.0
+    """
+    pred_yes, has_think, think_len, has_answer_tag = _extract_cot_pointwise_answer(solution_str)
+
+    # Format reward (up to 0.3)
+    format_reward = 0.0
+    if has_think and think_len > 20:
+        format_reward += 0.1
+    if has_answer_tag:
+        format_reward += 0.1
+    if 20 < think_len < 500:
+        format_reward += 0.1
+
+    # Accuracy reward (up to 0.7)
+    accuracy_reward = 0.0
+    if pred_yes is not None:
+        label = 0
+        if extra_info:
+            label = extra_info.get('label', 0)
+        else:
+            target = str(ground_truth).strip().lower()
+            label = 1 if 'yes' in target else 0
+
+        target_yes = (label == 1)
+        if pred_yes == target_yes:
+            accuracy_reward = 0.7
+
+    return format_reward + accuracy_reward
+
+
+def compute_score_cot_pointwise_asymmetric(data_source, solution_str, ground_truth, extra_info=None):
+    """
+    Asymmetric reward for pointwise CoT — prevents mode collapse.
+
+    With neg_ratio=2.0 (67% negatives, 33% positives):
+      - Always "Yes": 0.33*1.0 + 0.67*(-1.0) = -0.34 (terrible)
+      - Always "No":  0.33*(-0.3) + 0.67*0.5 = +0.24 (mediocre)
+      - Perfect:      0.33*1.0 + 0.67*0.5   = +0.67 (optimal)
+
+    Rewards (before format bonus):
+      - TP (correct Yes on positive):  +1.0
+      - TN (correct No on negative):   +0.5
+      - FP (wrong Yes on negative):    -1.0  (harsh)
+      - FN (wrong No on positive):     -0.3
+
+    Plus format_reward (0 ~ +0.2):
+      +0.1 for valid <think> with reasoning
+      +0.1 for valid <answer> tag
+
+    Total range: [-1.0, 1.2]
+    """
+    pred_yes, has_think, think_len, has_answer_tag = _extract_cot_pointwise_answer(solution_str)
+
+    # Format bonus (up to 0.2)
+    format_bonus = 0.0
+    if has_think and think_len > 20:
+        format_bonus += 0.1
+    if has_answer_tag:
+        format_bonus += 0.1
+
+    if pred_yes is None:
+        return -0.5 + format_bonus  # Unparseable
+
+    label = 0
+    if extra_info:
+        label = extra_info.get('label', 0)
+    else:
+        target = str(ground_truth).strip().lower()
+        label = 1 if 'yes' in target else 0
+
+    if label == 1:  # Positive sample
+        base = 1.0 if pred_yes else -0.3
+    else:  # Negative sample
+        base = -1.0 if pred_yes else 0.5
+
+    return base + format_bonus
+
+
+# =============================================================================
 # CHAIN-OF-THOUGHT (COT) REWARD FUNCTIONS FOR LIST-WISE RANKING
 # =============================================================================
 # New format: model outputs <think>reasoning</think><answer>[1:p, 2:p, ...]</answer>

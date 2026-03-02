@@ -32,6 +32,10 @@ def _reward_name(reward_type):
         "mind_cot_prob_ce": "compute_score_mind_cot_prob_ce",
         "mind_cot_prob_margin": "compute_score_mind_cot_prob_margin",
         "mind_cot_prob_format": "compute_score_mind_cot_prob_format",
+        # Pointwise CoT rewards (<think>/<answer>Yes|No)
+        "cot_pointwise_binary": "compute_score_cot_pointwise_binary",
+        "cot_pointwise_format": "compute_score_cot_pointwise_format",
+        "cot_pointwise_asymmetric": "compute_score_cot_pointwise_asymmetric",
     }
     return mapping.get(reward_type, "compute_score_rule")
 
