@@ -109,6 +109,7 @@ def train_verl(
         f"++actor_rollout_ref.rollout.name={rollout_name}",
         "++actor_rollout_ref.rollout.tensor_model_parallel_size=1",  # Disable tensor parallelism for small models
         "++actor_rollout_ref.model.override_config.attn_implementation=sdpa",  # Use PyTorch SDPA instead of flash_attention_2
+        "++data.chat_template_kwargs.enable_thinking=False",  # Disable Qwen3 native <think> to avoid conflict with our <think> tags
         "reward_model.enable=False",  # Disable built-in reward model; we use custom_reward_function
         f"++reward_model.rollout.name={rollout_name}",  # Satisfy mandatory field even when disabled
         f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={ppo_micro_batch_size_per_gpu}",
