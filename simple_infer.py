@@ -115,10 +115,10 @@ def main():
     # Load model
     print(f"\nLoading model: {args.model_path}")
     t0 = time.time()
-    model_kwargs = {"torch_dtype": torch.bfloat16, "device_map": "auto"}
+    model_kwargs = {"torch_dtype": torch.bfloat16}
     if args.flash_attn:
         model_kwargs["attn_implementation"] = "flash_attention_2"
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs)
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, **model_kwargs).to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
