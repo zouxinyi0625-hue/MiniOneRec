@@ -148,11 +148,17 @@ def build_multiple_choice_prompt(history: List[dict], candidates: List[dict]) ->
     return content + "\n\nAnswer:"
 
 
-def build_cot_prompt_content(history: List[dict], candidates: List[dict]) -> str:
+def build_cot_prompt_content(history: List[dict], candidates: List[dict], cot_style: str = "standard") -> str:
     """
     Build Chain-of-Thought prompt content for evaluation.
 
     This prompt encourages the model to reason before answering.
+    Must be aligned with prepare_mind_rl_cot.py::build_cot_prompt().
+
+    Args:
+        history: List of news dicts in user's reading history
+        candidates: List of candidate news dicts
+        cot_style: Style of CoT prompt ("standard", "category", "detailed")
     """
     lines = []
 
@@ -178,12 +184,32 @@ def build_cot_prompt_content(history: List[dict], candidates: List[dict]) -> str
         lines.append(f"{i}. {cat} {cand['text']}")
     lines.append("")
 
-    # CoT instruction
-    lines.append("=== Instructions ===")
-    lines.append("Think step by step about what topics interest this user based on their history.")
-    lines.append("Then select the article they are most likely to click.")
-    lines.append("")
-    lines.append("Provide your reasoning, then give your final answer as: Answer: <number>")
+    # CoT instruction based on style — aligned with prepare_mind_rl_cot.py
+    if cot_style == "category":
+        lines.append("=== Instructions ===")
+        lines.append("1. First, identify the main categories/topics in the user's reading history")
+        lines.append("2. Note any patterns (e.g., sports, politics, technology)")
+        lines.append("3. For each candidate, assess how well it matches the user's interests")
+        lines.append("4. Select the article most likely to be clicked")
+        lines.append("")
+        lines.append("Think step by step, then provide your final answer as: Answer: <number>")
+    elif cot_style == "detailed":
+        lines.append("=== Instructions ===")
+        lines.append("Analyze this recommendation task step by step:")
+        lines.append("")
+        lines.append("Step 1: Summarize the user's interests based on their reading history")
+        lines.append("Step 2: List the key topics/categories they seem interested in")
+        lines.append("Step 3: Evaluate each candidate article for relevance")
+        lines.append("Step 4: Identify the best match and explain why")
+        lines.append("")
+        lines.append("After your analysis, provide the final answer in this exact format:")
+        lines.append("Answer: <number>")
+    else:  # standard
+        lines.append("=== Instructions ===")
+        lines.append("Think step by step about what topics interest this user based on their history.")
+        lines.append("Then select the article they are most likely to click.")
+        lines.append("")
+        lines.append("Provide your reasoning, then give your final answer as: Answer: <number>")
 
     return "\n".join(lines)
 
@@ -538,6 +564,7 @@ def main():
     parser.add_argument("--use_chat_template", action="store_true", help="Use chat template (must match training)")
     parser.add_argument("--load_training_config", action="store_true", help="Load config from training_config.json in model_path")
     parser.add_argument("--use_cot", action="store_true", help="Use Chain-of-Thought generation (slower but may be more accurate)")
+    parser.add_argument("--cot_style", type=str, default="standard", choices=["standard", "category", "detailed"], help="CoT prompt style (must match training COT_STYLE)")
     parser.add_argument("--cot_max_tokens", type=int, default=256, help="Max tokens for CoT generation (default: 256)")
     args = parser.parse_args()
 
@@ -682,7 +709,7 @@ def main():
             # Build prompt and get scores
             if args.use_cot:
                 # Chain-of-Thought: generate reasoning and extract answer
-                content = build_cot_prompt_content(history_objs, candidate_objs)
+                content = build_cot_prompt_content(history_objs, candidate_objs, cot_style=args.cot_style)
                 prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template)
                 predicted_idx, _ = generate_cot_response(
                     model, tokenizer, prompt, len(candidate_objs), device, args.cot_max_tokens

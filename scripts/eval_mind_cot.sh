@@ -121,6 +121,7 @@ echo ""
 # Helper to build the python command flags (shared between single/parallel)
 build_cmd_flags() {
   local flags="--use_cot \
+    --cot_style ${COT_STYLE} \
     --cot_max_tokens ${COT_MAX_TOKENS} \
     --max_history ${MAX_HISTORY} \
     --max_candidates ${MAX_CANDIDATES}"
