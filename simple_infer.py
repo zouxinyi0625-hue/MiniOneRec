@@ -100,11 +100,14 @@ def main():
     parser.add_argument("--use_chat_template", action="store_true", default=True, help="Use chat template")
     parser.add_argument("--no_chat_template", action="store_true", help="Disable chat template")
     parser.add_argument("--flash_attn", action="store_true", help="Use Flash Attention 2")
+    parser.add_argument("--disable_thinking", action="store_true", help="Disable Qwen3 thinking mode for faster inference")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     if args.no_chat_template:
         args.use_chat_template = False
+
+    enable_thinking = not args.disable_thinking
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
@@ -152,7 +155,7 @@ def main():
 
         # Build prompt (same as eval)
         content = build_cot_prompt_content(history_objs, candidate_objs, cot_style=args.cot_style)
-        prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template)
+        prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template, enable_thinking=enable_thinking)
 
         # Print prompt (truncated)
         print(f"\n--- PROMPT ({len(prompt)} chars, ~{len(tokenizer.encode(prompt))} tokens) ---")

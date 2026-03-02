@@ -108,12 +108,15 @@ def build_prompt_content(history: List[dict], candidates: List[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool) -> str:
+def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool, enable_thinking: bool = True) -> str:
     """
     Format content for evaluation (used for CoT mode).
 
     NOTE: For standard evaluation, use build_ranking_prompt from mind_utils instead.
     This function is kept for CoT mode which has a different prompt structure.
+
+    Args:
+        enable_thinking: If False, disable Qwen3's <think> mode for faster inference.
     """
     if use_chat_template:
         system_prompt = (
@@ -126,11 +129,21 @@ def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool) -> 
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
         ]
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        # Try passing enable_thinking (supported by Qwen3 chat template)
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking
+            )
+        except TypeError:
+            # Fallback for tokenizers that don't support enable_thinking
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
     else:
         prompt = content + "\n\nAnswer:"
 
@@ -566,6 +579,7 @@ def main():
     parser.add_argument("--use_cot", action="store_true", help="Use Chain-of-Thought generation (slower but may be more accurate)")
     parser.add_argument("--cot_style", type=str, default="standard", choices=["standard", "category", "detailed"], help="CoT prompt style (must match training COT_STYLE)")
     parser.add_argument("--cot_max_tokens", type=int, default=256, help="Max tokens for CoT generation (default: 256)")
+    parser.add_argument("--disable_thinking", action="store_true", help="Disable Qwen3 thinking mode for faster inference")
     args = parser.parse_args()
 
     # Load training config if requested
@@ -710,7 +724,8 @@ def main():
             if args.use_cot:
                 # Chain-of-Thought: generate reasoning and extract answer
                 content = build_cot_prompt_content(history_objs, candidate_objs, cot_style=args.cot_style)
-                prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template)
+                enable_thinking = not getattr(args, 'disable_thinking', False)
+                prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template, enable_thinking=enable_thinking)
                 predicted_idx, _ = generate_cot_response(
                     model, tokenizer, prompt, len(candidate_objs), device, args.cot_max_tokens
                 )

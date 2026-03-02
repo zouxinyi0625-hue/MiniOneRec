@@ -69,6 +69,7 @@ MAX_CANDIDATES="${MAX_CANDIDATES:-30}" # Match training default
 COT_STYLE="${COT_STYLE:-standard}"     # Must match training COT_STYLE
 COT_MAX_TOKENS="${COT_MAX_TOKENS:-512}" # Must match training MAX_RESPONSE_LENGTH
 USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-1}"  # 1 for instruct models
+DISABLE_THINKING="${DISABLE_THINKING:-0}"   # 1 to disable Qwen3 thinking mode
 OUTPUT_FILE="${OUTPUT_FILE:-}"
 FLASH_ATTN="${FLASH_ATTN:-1}"
 
@@ -134,6 +135,9 @@ build_cmd_flags() {
   fi
   if [[ "${FLASH_ATTN}" -eq 1 ]]; then
     flags="${flags} --flash_attn"
+  fi
+  if [[ "${DISABLE_THINKING}" -eq 1 ]]; then
+    flags="${flags} --disable_thinking"
   fi
   echo "${flags}"
 }
