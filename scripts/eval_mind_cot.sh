@@ -71,6 +71,7 @@ COT_MAX_TOKENS="${COT_MAX_TOKENS:-512}" # Must match training MAX_RESPONSE_LENGT
 USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-1}"  # 1 for instruct models
 OUTPUT_FILE="${OUTPUT_FILE:-}"
 FLASH_ATTN="${FLASH_ATTN:-1}"
+DISABLE_THINKING="${DISABLE_THINKING:-0}"  # Set to 1 to disable Qwen3 thinking mode
 
 # Construct paths
 DATA_DIR="${MIND_ROOT}/${SPLIT}"
@@ -102,6 +103,7 @@ echo "  Max history: ${MAX_HISTORY}"
 echo "  Max candidates: ${MAX_CANDIDATES}"
 echo "  Max impressions: ${MAX_IMPRESSIONS:-all}"
 echo "  Flash Attention: ${FLASH_ATTN}"
+echo "  Disable thinking: ${DISABLE_THINKING}"
 echo "========================================="
 echo ""
 
@@ -122,6 +124,7 @@ echo ""
 build_cmd_flags() {
   local flags="--use_cot \
     --cot_max_tokens ${COT_MAX_TOKENS} \
+    --cot_style ${COT_STYLE} \
     --max_history ${MAX_HISTORY} \
     --max_candidates ${MAX_CANDIDATES}"
 
@@ -133,6 +136,9 @@ build_cmd_flags() {
   fi
   if [[ "${FLASH_ATTN}" -eq 1 ]]; then
     flags="${flags} --flash_attn"
+  fi
+  if [[ "${DISABLE_THINKING}" -eq 1 ]]; then
+    flags="${flags} --disable_thinking"
   fi
   echo "${flags}"
 }

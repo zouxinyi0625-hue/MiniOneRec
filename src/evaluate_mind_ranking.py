@@ -38,6 +38,7 @@ from sklearn.metrics import roc_auc_score
 # Add parent dir for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mind_utils import build_ranking_prompt
+from prepare_mind_rl_cot import build_cot_prompt
 
 
 def set_seed(seed: int) -> None:
@@ -108,12 +109,12 @@ def build_prompt_content(history: List[dict], candidates: List[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool) -> str:
+def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool, enable_thinking: bool = True) -> str:
     """
-    Format content for evaluation (used for CoT mode).
+    Format content for evaluation (used for non-CoT mode).
 
     NOTE: For standard evaluation, use build_ranking_prompt from mind_utils instead.
-    This function is kept for CoT mode which has a different prompt structure.
+    This function is kept for backward compatibility.
     """
     if use_chat_template:
         system_prompt = (
@@ -126,13 +127,48 @@ def format_prompt_for_eval(content: str, tokenizer, use_chat_template: bool) -> 
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
         ]
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking
+            )
+        except TypeError:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
     else:
         prompt = content + "\n\nAnswer:"
+
+    return prompt
+
+
+def format_cot_prompt_for_eval(messages: list, tokenizer, use_chat_template: bool, enable_thinking: bool = True) -> str:
+    """
+    Format CoT messages for evaluation.
+
+    Uses the same chat template as training (prepare_mind_rl_cot.py).
+    Messages already contain system + user roles from build_cot_prompt().
+    """
+    if use_chat_template:
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking
+            )
+        except TypeError:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+    else:
+        prompt = "\n".join(f"[{m['role']}]\n{m['content']}" for m in messages) + "\n\n"
 
     return prompt
 
@@ -148,54 +184,26 @@ def build_multiple_choice_prompt(history: List[dict], candidates: List[dict]) ->
     return content + "\n\nAnswer:"
 
 
-def build_cot_prompt_content(history: List[dict], candidates: List[dict]) -> str:
+def build_cot_prompt_content(history: List[dict], candidates: List[dict], cot_style: str = "standard") -> list:
     """
-    Build Chain-of-Thought prompt content for evaluation.
+    Build Chain-of-Thought prompt messages for evaluation.
 
-    This prompt encourages the model to reason before answering.
+    Delegates to prepare_mind_rl_cot.build_cot_prompt() to ensure
+    perfect alignment between training and evaluation prompts.
+
+    Returns:
+        List of chat messages [{"role": ..., "content": ...}, ...]
     """
-    lines = []
-
-    lines.append("You are a news recommendation assistant.")
-    lines.append("Your task is to predict which article a user will click based on their reading history.")
-    lines.append("")
-
-    # User history
-    lines.append("=== User Reading History ===")
-    if history:
-        recent_history = history[-30:] if len(history) > 30 else history
-        for i, h in enumerate(recent_history, 1):
-            cat = f"[{h.get('category', 'General')}]" if h.get('category') else ""
-            lines.append(f"{i}. {cat} {h['text']}")
-    else:
-        lines.append("(No reading history available)")
-    lines.append("")
-
-    # Candidates
-    lines.append("=== Candidate Articles ===")
-    for i, cand in enumerate(candidates, 1):
-        cat = f"[{cand.get('category', 'General')}]" if cand.get('category') else ""
-        lines.append(f"{i}. {cat} {cand['text']}")
-    lines.append("")
-
-    # CoT instruction
-    lines.append("=== Instructions ===")
-    lines.append("Think step by step about what topics interest this user based on their history.")
-    lines.append("Then select the article they are most likely to click.")
-    lines.append("")
-    lines.append("Provide your reasoning, then give your final answer as: Answer: <number>")
-
-    return "\n".join(lines)
+    return build_cot_prompt(history, candidates, cot_style=cot_style)
 
 
 def extract_cot_answer(generated_text: str, num_candidates: int) -> Optional[int]:
     """
-    Extract answer number from CoT output.
+    Extract answer from CoT output.
 
-    Tries multiple patterns:
-    - "Answer: X"
-    - "The answer is X"
-    - Last number in text
+    Supports two formats:
+    1. Prob-based: <answer>[1:prob, 2:prob, ...]</answer> -> returns index of highest prob
+    2. Number-based: "Answer: X" -> returns X
 
     Returns:
         1-indexed answer number or None if not found
@@ -209,22 +217,35 @@ def extract_cot_answer(generated_text: str, num_candidates: int) -> Optional[int
     if '</think>' in text:
         text = text.split('</think>', 1)[1].strip()
 
-    # Pattern 1: "Answer: X"
+    # Pattern 1: <answer>[1:prob, 2:prob, ...]</answer> (prob-based output)
+    answer_match = re.search(r'<answer>\s*\[(.*?)\]\s*</answer>', text, re.DOTALL)
+    if answer_match:
+        prob_str = answer_match.group(1)
+        probs = {}
+        for item in prob_str.split(','):
+            item = item.strip()
+            if ':' not in item:
+                continue
+            try:
+                cid_str, prob_val = item.split(':', 1)
+                cid = int(cid_str.strip())
+                prob = float(prob_val.strip())
+                if 1 <= cid <= num_candidates:
+                    probs[cid] = prob
+            except (ValueError, IndexError):
+                continue
+        if probs:
+            return max(probs, key=probs.get)
+
+    # Pattern 2: "Answer: X"
     match = re.search(r'[Aa]nswer\s*:\s*(\d+)', text)
     if match:
         ans = int(match.group(1))
         if 1 <= ans <= num_candidates:
             return ans
 
-    # Pattern 2: "The answer is X"
+    # Pattern 3: "The answer is X"
     match = re.search(r'[Tt]he\s+answer\s+is\s+(\d+)', text)
-    if match:
-        ans = int(match.group(1))
-        if 1 <= ans <= num_candidates:
-            return ans
-
-    # Pattern 3: "I choose X" or similar
-    match = re.search(r'[Ii]\s+(?:choose|select|pick)\s+(\d+)', text)
     if match:
         ans = int(match.group(1))
         if 1 <= ans <= num_candidates:
@@ -238,6 +259,49 @@ def extract_cot_answer(generated_text: str, num_candidates: int) -> Optional[int
             return ans
 
     return None
+
+
+def extract_cot_probs(generated_text: str, num_candidates: int) -> Optional[List[float]]:
+    """
+    Extract click probabilities from <answer>[1:prob, 2:prob, ...]</answer> format.
+
+    Returns list of probabilities (0-indexed) or None if parsing fails.
+    """
+    if not generated_text:
+        return None
+
+    text = generated_text.strip()
+
+    # If model used <think> tags, only look after </think>
+    if '</think>' in text:
+        text = text.split('</think>', 1)[1].strip()
+
+    # Try <answer>...</answer> tags
+    answer_match = re.search(r'<answer>\s*\[(.*?)\]\s*</answer>', text, re.DOTALL)
+    if not answer_match:
+        # Fallback: look for [...] directly
+        answer_match = re.search(r'\[([\d:., \n]+)\]', text, re.DOTALL)
+
+    if not answer_match:
+        return None
+
+    prob_str = answer_match.group(1)
+    probs = [0.0] * num_candidates
+
+    for item in prob_str.split(','):
+        item = item.strip()
+        if ':' not in item:
+            continue
+        try:
+            cid_str, prob_str_val = item.split(':', 1)
+            cid = int(cid_str.strip())
+            prob = float(prob_str_val.strip())
+            if 1 <= cid <= num_candidates:
+                probs[cid - 1] = prob
+        except (ValueError, IndexError):
+            continue
+
+    return probs
 
 
 def generate_cot_response(
@@ -300,6 +364,25 @@ def cot_scores_from_prediction(predicted_idx: int, num_candidates: int) -> List[
     scores = [0.0] * num_candidates
     if 0 <= predicted_idx < num_candidates:
         scores[predicted_idx] = 1.0
+    return scores
+
+
+def cot_scores_from_probs(generated_text: str, num_candidates: int) -> List[float]:
+    """
+    Convert CoT prob-based output to scores array.
+
+    Uses extracted probabilities directly as scores for AUC/nDCG computation.
+    Falls back to binary prediction if prob parsing fails.
+    """
+    probs = extract_cot_probs(generated_text, num_candidates)
+    if probs and any(p > 0 for p in probs):
+        return probs
+
+    # Fallback: use binary prediction from extract_cot_answer
+    answer = extract_cot_answer(generated_text, num_candidates)
+    scores = [0.0] * num_candidates
+    if answer is not None and 1 <= answer <= num_candidates:
+        scores[answer - 1] = 1.0
     return scores
 
 
@@ -538,7 +621,10 @@ def main():
     parser.add_argument("--use_chat_template", action="store_true", help="Use chat template (must match training)")
     parser.add_argument("--load_training_config", action="store_true", help="Load config from training_config.json in model_path")
     parser.add_argument("--use_cot", action="store_true", help="Use Chain-of-Thought generation (slower but may be more accurate)")
-    parser.add_argument("--cot_max_tokens", type=int, default=256, help="Max tokens for CoT generation (default: 256)")
+    parser.add_argument("--cot_max_tokens", type=int, default=512, help="Max tokens for CoT generation (default: 512)")
+    parser.add_argument("--cot_style", type=str, default="standard", choices=["standard", "category", "summary"],
+                        help="CoT prompt style - must match training (default: standard)")
+    parser.add_argument("--disable_thinking", action="store_true", help="Disable Qwen3 thinking mode (faster inference)")
     args = parser.parse_args()
 
     # Load training config if requested
@@ -681,13 +767,15 @@ def main():
 
             # Build prompt and get scores
             if args.use_cot:
-                # Chain-of-Thought: generate reasoning and extract answer
-                content = build_cot_prompt_content(history_objs, candidate_objs)
-                prompt = format_prompt_for_eval(content, tokenizer, args.use_chat_template)
-                predicted_idx, _ = generate_cot_response(
+                # Chain-of-Thought: generate reasoning and extract answer/probs
+                enable_thinking = not args.disable_thinking
+                messages = build_cot_prompt_content(history_objs, candidate_objs, cot_style=args.cot_style)
+                prompt = format_cot_prompt_for_eval(messages, tokenizer, args.use_chat_template, enable_thinking=enable_thinking)
+                predicted_idx, generated_text = generate_cot_response(
                     model, tokenizer, prompt, len(candidate_objs), device, args.cot_max_tokens
                 )
-                scores = cot_scores_from_prediction(predicted_idx, len(candidate_objs))
+                # Use prob-based scoring if available, fallback to binary
+                scores = cot_scores_from_probs(generated_text, len(candidate_objs))
             else:
                 # Standard: score each option by probability
                 # Use shared prompt builder from mind_utils for consistency with training
