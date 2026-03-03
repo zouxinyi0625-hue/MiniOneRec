@@ -39,8 +39,20 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     EarlyStoppingCallback,
+    TrainerCallback,
 )
 import fire
+
+
+class SaveTokenizerCallback(TrainerCallback):
+    """Save tokenizer alongside every checkpoint so it can be loaded standalone."""
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def on_save(self, args, state, control, **kwargs):
+        checkpoint_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        if os.path.isdir(checkpoint_dir):
+            self.tokenizer.save_pretrained(checkpoint_dir)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -420,13 +432,17 @@ def train(
         training_args_dict["deepspeed"] = deepspeed_config
         print(f"Using DeepSpeed config: {deepspeed_config}")
 
+    callbacks = [SaveTokenizerCallback(tokenizer)]
+    if val_data:
+        callbacks.append(EarlyStoppingCallback(early_stopping_patience=5))
+
     trainer = transformers.Trainer(
         model=model,
         train_dataset=train_data,
         eval_dataset=val_data,
         args=transformers.TrainingArguments(**training_args_dict),
         data_collator=_StackCollator(),
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=5)] if val_data else None,
+        callbacks=callbacks,
     )
 
     model.config.use_cache = False
