@@ -86,7 +86,7 @@ EVAL_PARQUET=${EVAL_PARQUET:-${DATA_ROOT}/dev/rl_cot_dev.parquet}
 # Prepare training data if not exists
 if [ ! -f "$TRAIN_PARQUET" ]; then
     echo "Preparing training data..."
-    python prepare_mind_rl_cot.py \
+    python src/prepare_mind_rl_cot.py \
         --behaviors_path ${DATA_ROOT}/train/behaviors.tsv \
         --news_path ${DATA_ROOT}/train/news.tsv \
         --output_parquet ${TRAIN_PARQUET} \
@@ -101,7 +101,7 @@ fi
 # Prepare evaluation data if not exists
 if [ ! -f "$EVAL_PARQUET" ]; then
     echo "Preparing evaluation data..."
-    python prepare_mind_rl_cot.py \
+    python src/prepare_mind_rl_cot.py \
         --behaviors_path ${DATA_ROOT}/dev/behaviors.tsv \
         --news_path ${DATA_ROOT}/dev/news.tsv \
         --output_parquet ${EVAL_PARQUET} \
