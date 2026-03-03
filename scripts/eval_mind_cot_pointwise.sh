@@ -49,14 +49,14 @@ if [[ -z "${MIND_ROOT:-}" ]]; then
 fi
 
 COT_STYLE="${COT_STYLE:-standard}"
-SCORING="${SCORING:-logit}"           # logit (fast) or generative (slow)
+SCORING="${SCORING:-forced_prefix}"    # forced_prefix (fast, for CoT), logit (non-CoT), generative (slow)
 BATCH_SIZE="${BATCH_SIZE:-4}"
 COT_MAX_TOKENS="${COT_MAX_TOKENS:-256}"
 MAX_HISTORY="${MAX_HISTORY:-30}"
 USE_ABSTRACT="${USE_ABSTRACT:-0}"
 USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-1}"
 FLASH_ATTN="${FLASH_ATTN:-1}"
-DISABLE_THINKING="${DISABLE_THINKING:-0}"
+DISABLE_THINKING="${DISABLE_THINKING:-1}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
 
 DATA_DIR="${MIND_ROOT}/${SPLIT}"

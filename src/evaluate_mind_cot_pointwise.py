@@ -149,12 +149,17 @@ def batch_score_logit(
     yes_token_id: int,
     no_token_id: int,
     batch_size: int = 4,
+    answer_prefix: str = "",
 ) -> List[float]:
-    """Score multiple candidates in batches using logit method."""
+    """Score multiple candidates in batches using logit method.
+    
+    If answer_prefix is provided (e.g. "<think>\n</think>\n<answer>"),
+    it is appended to each prompt so the logit is read at the right position.
+    """
     all_scores = []
 
     all_encodings = [
-        tokenizer.encode(p, add_special_tokens=False, truncation=True, max_length=4096)
+        tokenizer.encode(p + answer_prefix, add_special_tokens=False, truncation=True, max_length=4096)
         for p in prompts
     ]
 
@@ -198,8 +203,10 @@ def main():
     parser.add_argument("--disable_thinking", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_file", type=str, default="", help="Save predictions for MIND leaderboard")
-    parser.add_argument("--scoring", choices=["logit", "generative"], default="logit",
-                        help="Scoring method: 'logit' (fast, P(Yes)-P(No)) or 'generative' (slow, full CoT generation)")
+    parser.add_argument("--scoring", choices=["logit", "generative", "forced_prefix"], default="forced_prefix",
+                        help="Scoring method: 'forced_prefix' (fast, append <think></think><answer> then P(Yes)-P(No)), "
+                             "'logit' (fast, raw P(Yes)-P(No) without prefix — only for non-CoT models), "
+                             "'generative' (slow, full CoT generation)")
     parser.add_argument("--batch_size", type=int, default=4,
                         help="Batch size for logit scoring (only used with --scoring logit)")
     parser.add_argument("--cot_max_tokens", type=int, default=256,
@@ -296,7 +303,7 @@ def main():
             candidate_objs = [news[nid] for nid in candidate_ids]
 
             # Score each candidate
-            if args.scoring == "logit":
+            if args.scoring in ("logit", "forced_prefix"):
                 # Build all prompts, score with logits in batch
                 prompts = []
                 for cand in candidate_objs:
@@ -304,9 +311,13 @@ def main():
                     prompt = format_prompt(messages, tokenizer, enable_thinking)
                     prompts.append(prompt)
 
+                # For CoT models: append forced prefix so logit reads Yes/No after <answer>
+                answer_prefix = "<think>\n</think>\n<answer>" if args.scoring == "forced_prefix" else ""
+
                 scores = batch_score_logit(
                     model, tokenizer, prompts, device,
-                    yes_token_id, no_token_id, args.batch_size
+                    yes_token_id, no_token_id, args.batch_size,
+                    answer_prefix=answer_prefix,
                 )
             else:
                 # Generative: full CoT for each candidate (slow)
