@@ -48,7 +48,7 @@ if [[ -z "${MIND_ROOT:-}" ]]; then
   fi
 fi
 
-COT_STYLE="${COT_STYLE:-category}"
+COT_STYLE="${COT_STYLE:-standard}"
 SCORING="${SCORING:-logit}"           # logit (fast) or generative (slow)
 BATCH_SIZE="${BATCH_SIZE:-4}"
 COT_MAX_TOKENS="${COT_MAX_TOKENS:-256}"

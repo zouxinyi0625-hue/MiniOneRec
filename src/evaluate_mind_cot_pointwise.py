@@ -190,7 +190,7 @@ def main():
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--behaviors_path", required=True)
     parser.add_argument("--news_path", required=True)
-    parser.add_argument("--cot_style", default="standard", choices=["standard", "category", "detailed"])
+    parser.add_argument("--cot_style", default="standard", choices=["standard", "category", "detailed"])  # must match training cot_style
     parser.add_argument("--max_history", type=int, default=30)
     parser.add_argument("--max_impressions", type=int, default=0, help="0=all")
     parser.add_argument("--use_abstract", action="store_true")
