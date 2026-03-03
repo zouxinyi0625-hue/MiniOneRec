@@ -28,6 +28,7 @@ def _reward_name(reward_type):
         "mind_cot_format": "compute_score_mind_cot_format",
         # Chain-of-Thought rewards (new prob-based <think>/<answer> format)
         "mind_cot_prob_auc": "compute_score_mind_cot_prob_auc",
+        "mind_cot_prob_combined": "compute_score_mind_cot_prob_combined",
         "mind_cot_prob_ndcg": "compute_score_mind_cot_prob_ndcg",
         "mind_cot_prob_ce": "compute_score_mind_cot_prob_ce",
         "mind_cot_prob_margin": "compute_score_mind_cot_prob_margin",

@@ -167,7 +167,7 @@ def main(
         # Chain-of-Thought (legacy single-answer)
         'mind_cot_binary', 'mind_cot_ndcg', 'mind_cot_auc', 'mind_cot_margin', 'mind_cot_format',
         # Chain-of-Thought (new prob-based <think>/<answer> format)
-        'mind_cot_prob_auc', 'mind_cot_prob_ndcg', 'mind_cot_prob_ce', 'mind_cot_prob_margin', 'mind_cot_prob_format',
+        'mind_cot_prob_auc', 'mind_cot_prob_combined', 'mind_cot_prob_ndcg', 'mind_cot_prob_ce', 'mind_cot_prob_margin', 'mind_cot_prob_format',
         # Pointwise CoT (<think>/<answer>Yes|No)
         'cot_pointwise_binary', 'cot_pointwise_format', 'cot_pointwise_asymmetric',
     ]

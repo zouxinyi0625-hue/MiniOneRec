@@ -1222,6 +1222,121 @@ def compute_score_mind_cot_prob_auc(data_source, solution_str, ground_truth, ext
     return format_reward + auc_reward
 
 
+def compute_score_mind_cot_prob_combined(data_source, solution_str, ground_truth, extra_info=None):
+    """
+    Combined reward optimizing AUC + nDCG + probability separation.
+
+    Reward = format_bonus + auc_component + ndcg_component + separation_bonus
+
+    Components:
+      - format_bonus (0.0 ~ 0.1):
+          +0.05 for valid <think>...</think> with reasoning
+          +0.05 for valid <answer>...</answer> with parseable probs covering all candidates
+      - auc_component (0.0 ~ 0.4):
+          AUC score scaled to [0, 0.4]
+      - ndcg_component (0.0 ~ 0.35):
+          nDCG@10 scaled to [0, 0.35]
+      - separation_bonus (0.0 ~ 0.15):
+          Rewards clear probability gap between clicked and non-clicked items.
+          bonus = clamp(avg_pos_prob - avg_neg_prob, 0, 1) * 0.15
+
+    Total range: [0.0, 1.0]
+
+    Design rationale:
+      - Format bonus reduced to 10% (was 30%) — format learned quickly, should not dominate
+      - AUC (40%) + nDCG (35%) = 75% ranking quality — directly optimizes both metrics
+      - Separation bonus (15%) — encourages the model to produce DISTINCT probabilities
+        instead of flat 0.4-0.6 for all candidates, which improves AUC
+      - "all same prob" strategy: AUC=0.5 → 0.2, nDCG~0.3 → 0.1, sep=0 → total ~0.4
+      - Perfect ranking: AUC=1.0 → 0.4, nDCG=1.0 → 0.35, sep~0.8 → 0.12 → total ~0.97
+    """
+    import math
+
+    if not extra_info or 'labels' not in extra_info:
+        return 0.0
+
+    labels = extra_info.get('labels', [])
+    num_candidates = extra_info.get('num_candidates', len(labels))
+
+    text = str(solution_str).strip() if solution_str else ""
+
+    # --- Format bonus (up to 0.1) ---
+    format_bonus = 0.0
+    think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
+    if think_match and len(think_match.group(1).strip()) > 20:
+        format_bonus += 0.05
+
+    probs = extract_cot_probs(text, num_candidates)
+
+    if probs and len(probs) >= num_candidates:
+        format_bonus += 0.05
+    elif probs:
+        format_bonus += 0.025  # partial coverage
+
+    # --- AUC component (up to 0.4) ---
+    auc_component = 0.0
+    clicked_probs = []
+    non_clicked_probs = []
+
+    if probs:
+        for i, label in enumerate(labels):
+            cid = i + 1
+            p = probs.get(cid, 0.0)
+            if label == 1:
+                clicked_probs.append(p)
+            else:
+                non_clicked_probs.append(p)
+
+        if clicked_probs and non_clicked_probs:
+            correct = 0
+            total = 0
+            for cp in clicked_probs:
+                for np_ in non_clicked_probs:
+                    total += 1
+                    if cp > np_:
+                        correct += 1
+                    elif cp == np_:
+                        correct += 0.5
+            raw_auc = correct / total if total > 0 else 0.0
+            auc_component = raw_auc * 0.4
+
+    # --- nDCG@10 component (up to 0.35) ---
+    ndcg_component = 0.0
+    if probs:
+        items = []
+        for i, label in enumerate(labels):
+            cid = i + 1
+            p = probs.get(cid, 0.0)
+            items.append((p, label))
+
+        # Sort by predicted prob descending
+        items.sort(key=lambda x: x[0], reverse=True)
+
+        k = min(10, len(items))
+        dcg = 0.0
+        for rank in range(k):
+            rel = items[rank][1]
+            dcg += rel / math.log2(rank + 2)  # rank+2 because rank is 0-indexed
+
+        ideal = sorted([l for _, l in items], reverse=True)
+        idcg = 0.0
+        for rank in range(k):
+            idcg += ideal[rank] / math.log2(rank + 2)
+
+        if idcg > 0:
+            ndcg_component = (dcg / idcg) * 0.35
+
+    # --- Separation bonus (up to 0.15) ---
+    separation_bonus = 0.0
+    if clicked_probs and non_clicked_probs:
+        avg_pos = sum(clicked_probs) / len(clicked_probs)
+        avg_neg = sum(non_clicked_probs) / len(non_clicked_probs)
+        gap = max(0.0, avg_pos - avg_neg)  # positive gap only
+        separation_bonus = min(gap, 1.0) * 0.15
+
+    return format_bonus + auc_component + ndcg_component + separation_bonus
+
+
 def compute_score_mind_cot_prob_ndcg(data_source, solution_str, ground_truth, extra_info=None):
     """
     nDCG@k reward based on predicted click probabilities.
